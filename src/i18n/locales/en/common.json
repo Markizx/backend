@@ -1,0 +1,57 @@
+{
+  "errors": {
+    "unauthorized": "Unauthorized",
+    "not_found": "Not found",
+    "validation_error": "Validation error",
+    "internal_error": "Internal server error",
+    "subscription_required": "Active subscription required",
+    "email_not_verified": "Email not verified",
+    "account_blocked": "Account blocked",
+    "invalid_credentials": "Invalid email or password",
+    "email_already_registered": "Email already registered",
+    "invalid_token": "Invalid or expired token",
+    "file_too_large": "File too large (maximum {{maxSize}}MB)",
+    "subscription_disabled": "Subscriptions are disabled for the service",
+    "password_requirements": "Password must be at least 8 characters long, contain letters, numbers and at least one special character (!@#$%^&*)",
+    "email_password_required": "Email and password required"
+  },
+  "success": {
+    "registration_successful": "Registration successful. Please check your email for confirmation.",
+    "email_confirmed": "Email confirmed",
+    "password_reset_sent": "Password reset instruction sent",
+    "password_changed": "Password successfully changed",
+    "profile_updated": "Profile updated",
+    "email_changed": "Email changed, confirmation email sent",
+    "subscription_cancelled": "Subscription cancelled",
+    "subscription_changed": "Subscription plan changed",
+    "ticket_created": "Support ticket created",
+    "chat_created": "New chat created",
+    "chat_deleted": "Chat deleted",
+    "chat_title_updated": "Chat title updated",
+    "message_sent": "Message sent",
+    "language_changed": "Language preference changed successfully"
+  },
+  "plan_names": {
+    "basic": "Basic",
+    "plus": "Plus", 
+    "pro": "Pro"
+  },
+  "limits": {
+    "text_limit_exceeded": "Text generation limit ({{limit}}) exceeded. Please upgrade your plan.",
+    "image_limit_exceeded": "Image generation limit ({{limit}}) exceeded. Please upgrade your plan.",
+    "video_limit_exceeded": "Video generation limit ({{limit}}) exceeded. Please upgrade your plan.",
+    "chat_limit_exceeded": "Daily chat message limit ({{limit}}) reached for your plan",
+    "max_chats_exceeded": "Maximum chat limit ({{limit}}) reached for your plan. Delete old chats or upgrade your plan.",
+    "trial_expired": "Trial period expired. Please activate a subscription.",
+    "subscription_expired": "Subscription expired. Please activate a new plan."
+  },
+  "chat": {
+    "new_chat": "New Chat",
+    "message_required": "Message is required and cannot be empty",
+    "message_too_long": "Message too long (maximum 5000 characters)",
+    "title_required": "Title is required and cannot be empty",
+    "title_too_long": "Title too long (maximum 100 characters)",
+    "ai_timeout": "AI response timeout",
+    "ai_error": "Failed to send message"
+  }
+}
