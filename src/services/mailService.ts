@@ -13,10 +13,16 @@ async function initializeTransporter() {
       port: Number(config.smtpPort) || 587,
       secure: config.smtpPort === '465',
       auth: {
-        user: config.smtpUser || 'postmaster@contentstar.app',
-        pass: config.smtpPass || 'cb140f8e2dfbae06a217c3119ff9d469-a908eefc-15dbd582',
+        user: config.smtpUser,
+        pass: config.smtpPass,
       },
     };
+
+    // Проверка наличия учетных данных
+    if (!smtpConfig.auth.user || !smtpConfig.auth.pass) {
+      logger.warn('SMTP учетные данные отсутствуют в конфигурации. Функциональность email будет недоступна.');
+      return;
+    }
 
     logger.info('SMTP конфигурация:', {
       host: smtpConfig.host,
@@ -36,7 +42,8 @@ async function initializeTransporter() {
   } catch (err: any) {
     logger.error('Ошибка инициализации SMTP:', { error: err.message, stack: err.stack });
     Sentry.captureException(err);
-    process.exit(1);
+    // Изменим на логирование ошибки без завершения процесса
+    logger.warn('Email функциональность будет недоступна из-за ошибки конфигурации SMTP');
   }
 }
 
@@ -44,8 +51,13 @@ initializeTransporter();
 
 export const sendConfirmationEmail = async (email: string, token: string) => {
   try {
+    if (!transporter) {
+      logger.error('Попытка отправить email, но SMTP транспортер не инициализирован');
+      return;
+    }
+
     const config = await getConfig();
-    const fromAddress = config.mailFrom || '"Contentstar" <postmaster@contentstar.app>';
+    const fromAddress = config.mailFrom || '"Contentstar" <no-reply@contentstar.app>';
     const link = `${config.frontendUrl}/confirm/${token}`;
 
     logger.info('Отправка письма подтверждения:', { email, from: fromAddress, link });
@@ -72,8 +84,13 @@ export const sendConfirmationEmail = async (email: string, token: string) => {
 
 export const sendResetPasswordEmail = async (email: string, token: string) => {
   try {
+    if (!transporter) {
+      logger.error('Попытка отправить email, но SMTP транспортер не инициализирован');
+      return;
+    }
+
     const config = await getConfig();
-    const fromAddress = config.mailFrom || '"Contentstar" <postmaster@contentstar.app>';
+    const fromAddress = config.mailFrom || '"Contentstar" <no-reply@contentstar.app>';
     const link = `${config.frontendUrl}/reset-password/${token}`;
 
     logger.info('Отправка письма сброса пароля:', { email, from: fromAddress, link });
