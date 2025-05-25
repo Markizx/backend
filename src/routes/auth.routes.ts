@@ -5,6 +5,7 @@ import { AuthController } from '@controllers/auth.controller';
 import { authenticate, optionalAuthenticate } from '@middleware/auth.middleware';
 import { authRateLimiter } from '@middleware/rate.limiter';
 import { trackEvent } from '@middleware/analytics.middleware';
+import { blacklistOnLogout } from '@utils/token-blacklist';
 import { ApiResponse } from '@utils/response';
 import passport from 'passport';
 import logger from '@utils/logger';
@@ -22,11 +23,16 @@ const passwordValidation = body('password')
   .matches(/[!@#$%^&*]/)
   .withMessage('Пароль должен содержать хотя бы один специальный символ (!@#$%^&*)');
 
+const emailValidation = body('email')
+  .isEmail()
+  .withMessage('Неверный формат email')
+  .normalizeEmail();
+
 router.post(
   '/register',
   authRateLimiter,
-  body('email').isEmail().withMessage('Неверный формат email'),
-  body('name').optional().isLength({ min: 2 }).withMessage('Имя должно быть не короче 2 символов'),
+  emailValidation,
+  body('name').optional().isLength({ min: 2 }).withMessage('Имя должно быть не короче 2 символов').trim(),
   passwordValidation,
   trackEvent('registration', 'user'),
   AuthController.register
@@ -37,7 +43,7 @@ router.get('/confirm/:token', trackEvent('email_confirmed', 'user'), AuthControl
 router.post(
   '/login',
   authRateLimiter,
-  body('email').isEmail().withMessage('Неверный формат email'),
+  emailValidation,
   body('password').notEmpty().withMessage('Пароль обязателен'),
   trackEvent('login', 'user'),
   AuthController.login
@@ -46,7 +52,7 @@ router.post(
 router.post(
   '/request-password-reset',
   authRateLimiter,
-  body('email').isEmail().withMessage('Неверный формат email'),
+  emailValidation,
   trackEvent('password_reset_requested', 'user'),
   AuthController.requestPasswordReset
 );
@@ -88,11 +94,13 @@ router.get('/apple', AuthController.appleAuth);
 // Временно отключено до получения секретов Apple
 // router.post('/apple/callback', passport.authenticate('apple', { session: false }), AuthController.appleAuthCallback);
 
-// Logout route (опциональный, для явного logout на фронтенде)
-router.post('/logout', optionalAuthenticate, trackEvent('logout', 'user'), (req: Request, res: Response) => {
-  // В случае JWT logout происходит на клиенте (удаление токена)
-  // Здесь можно добавить логику для blacklist токенов если нужно
-  ApiResponse.send(res, null, 'Successfully logged out');
-});
+// Logout route с поддержкой черного списка токенов
+router.post(
+  '/logout', 
+  optionalAuthenticate, 
+  blacklistOnLogout,
+  trackEvent('logout', 'user'), 
+  AuthController.logout
+);
 
 export default router;

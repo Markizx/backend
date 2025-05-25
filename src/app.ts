@@ -7,6 +7,7 @@ import morgan from 'morgan';
 import * as Sentry from '@sentry/node';
 import { getConfig } from '@config/config';
 import logger from '@utils/logger';
+import { enhancedLogger, loggerMiddleware } from '@utils/enhanced-logger';
 import userRoutes from '@routes/user.routes';
 import generateRoutes from '@routes/generate.routes';
 import authRoutes from '@routes/auth.routes';
@@ -26,32 +27,38 @@ import { trackError } from '@middleware/analytics.middleware';
 import { errorMiddleware } from '@middleware/error.middleware';
 import { GlobalConfig } from '@models/GlobalConfig';
 import { createAdminIfNeeded } from './utils/createAdmin';
+// Новые импорты для улучшений безопасности
+import { enhancedSecurityMiddleware, bodySizeLimit, validateHeaders, timingSafeResponse } from '@middleware/security.middleware';
+import { sanitizeMiddleware } from '@utils/sanitizer';
+import { withRetry, retryConditions } from '@utils/retry';
+import { circuitBreakerManager } from '@utils/circuit-breaker';
 
 const app: Express = express();
 
-// Функция для ожидания подключения к MongoDB
+// Функция для ожидания подключения к MongoDB с retry
 async function waitForMongoConnection(maxRetries = 60, retryInterval = 5000) {
-  for (let i = 0; i < maxRetries; i++) {
-    try {
+  return withRetry(
+    async () => {
       await mongoose.connection.asPromise();
       const state = mongoose.connection.readyState;
-      logger.info(`MongoDB соединение подтверждено, readyState: ${state}`);
+      enhancedLogger.info(`MongoDB соединение подтверждено, readyState: ${state}`);
       if (state === 1) return true; // 1 = connected
       throw new Error(`MongoDB readyState не 1, текущее значение: ${state}`);
-    } catch (err: any) {
-      logger.warn(`Попытка ${i + 1} подключения к MongoDB не удалась: ${err.message}`);
-      if (i < maxRetries - 1) {
-        await new Promise(resolve => setTimeout(resolve, retryInterval));
+    },
+    {
+      maxRetries,
+      baseDelay: retryInterval,
+      onRetry: (error, attempt) => {
+        enhancedLogger.warn(`Попытка ${attempt} подключения к MongoDB не удалась`, { error: error.message });
       }
     }
-  }
-  throw new Error('Не удалось установить соединение с MongoDB после нескольких попыток');
+  );
 }
 
 // Функция для проверки/переподключения к MongoDB
 async function ensureMongoConnection(cfg: any) {
   if (mongoose.connection.readyState !== 1) {
-    logger.warn('MongoDB не подключена, пытаемся переподключиться');
+    enhancedLogger.warn('MongoDB не подключена, пытаемся переподключиться');
     await mongoose.connect(cfg.mongodbUri, mongoOptions);
   }
 }
@@ -75,7 +82,7 @@ const mongoOptions: mongoose.ConnectOptions = {
 // Инициализация приложения
 async function initializeApp() {
   try {
-    logger.info('Запуск инициализации приложения');
+    enhancedLogger.info('Запуск инициализации приложения');
     const cfg = await getConfig();
 
     // Инициализация Sentry
@@ -104,9 +111,27 @@ async function initializeApp() {
     app.use(Sentry.Handlers.requestHandler());
     app.use(Sentry.Handlers.tracingHandler());
 
+    // Применяем расширенные настройки безопасности
+    enhancedSecurityMiddleware(app);
+    
+    // Валидация заголовков
+    app.use(validateHeaders);
+    
+    // Защита от timing атак
+    app.use(timingSafeResponse);
+    
+    // Ограничение размера тела запроса
+    app.use(bodySizeLimit('10mb'));
+    
     // Базовые middleware
-    app.use(express.json({ limit: '50mb' }));
-    app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+    app.use(express.json({ limit: '10mb' }));
+    app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+    
+    // Санитизация входных данных
+    app.use(sanitizeMiddleware);
+    
+    // Улучшенное логирование с контекстом
+    app.use(loggerMiddleware);
     
     // CORS с улучшенной конфигурацией
     const corsOptions = {
@@ -129,57 +154,58 @@ async function initializeApp() {
       credentials: true,
       optionsSuccessStatus: 200,
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'Accept-Language']
+      allowedHeaders: ['Content-Type', 'Authorization', 'Accept-Language', 'X-Request-ID']
     };
     
     app.use(cors(corsOptions));
-    app.use(helmet({
-      contentSecurityPolicy: {
-        directives: {
-          defaultSrc: ["'self'"],
-          scriptSrc: ["'self'", "'unsafe-inline'"],
-          styleSrc: ["'self'", "'unsafe-inline'"],
-          imgSrc: ["'self'", "data:", "https:"],
-        },
-      },
-      crossOriginEmbedderPolicy: false,
-    }));
 
     // Логирование с улучшенным форматом
     app.use(morgan('combined', { 
       stream: { 
-        write: (message: string) => logger.info(message.trim(), { component: 'http' })
+        write: (message: string) => enhancedLogger.http(message.trim())
       },
       skip: (req) => req.path === '/health' // Пропускаем health check
     }));
 
-    // Подключение к MongoDB
+    // Подключение к MongoDB с Circuit Breaker
     mongoose.set('strictQuery', false);
-    logger.info('Подключение к MongoDB...', {
+    enhancedLogger.info('Подключение к MongoDB...', {
       uri: cfg.mongodbUri.replace(/:.*@/, ':<hidden>@')
     });
 
     // Event listeners для MongoDB
     mongoose.connection.on('error', err => {
-      logger.error('Ошибка соединения с MongoDB:', { error: err.message, stack: err.stack });
+      enhancedLogger.error('Ошибка соединения с MongoDB:', err);
       // Не выходим из процесса, пытаемся переподключиться
     });
 
     mongoose.connection.on('connected', () => {
-      logger.info('MongoDB успешно подключена');
+      enhancedLogger.info('MongoDB успешно подключена');
     });
 
     mongoose.connection.on('disconnected', async () => {
-      logger.warn('MongoDB отключена, пытаемся переподключиться');
+      enhancedLogger.warn('MongoDB отключена, пытаемся переподключиться');
       try {
-        await mongoose.connect(cfg.mongodbUri, mongoOptions);
+        await circuitBreakerManager.execute(
+          'mongodb-reconnect',
+          async () => {
+            await mongoose.connect(cfg.mongodbUri, mongoOptions);
+          },
+          {
+            failureThreshold: 5,
+            resetTimeout: 30000,
+            fallback: async () => {
+              enhancedLogger.error('Не удалось переподключиться к MongoDB через Circuit Breaker');
+            }
+          }
+        );
       } catch (err: any) {
-        logger.error('Ошибка переподключения MongoDB:', { error: err.message, stack: err.stack });
+        enhancedLogger.error('Ошибка переподключения MongoDB:', err);
       }
     });
 
     mongoose.connection.on('reconnected', () => {
-      logger.info('MongoDB успешно переподключена');
+      enhancedLogger.info('MongoDB успешно переподключена');
     });
 
     // Первоначальное подключение
@@ -190,9 +216,9 @@ async function initializeApp() {
     if (mongoose.connection.db) {
       try {
         await mongoose.connection.db.command({ ping: 1 });
-        logger.info('MongoDB ping успешен');
+        enhancedLogger.info('MongoDB ping успешен');
       } catch (pingErr: any) {
-        logger.error('MongoDB ping не удался:', { error: pingErr.message });
+        enhancedLogger.error('MongoDB ping не удался:', pingErr);
         throw pingErr;
       }
     } else {
@@ -201,24 +227,31 @@ async function initializeApp() {
 
     // Инициализируем глобальную конфигурацию
     await GlobalConfig.findOne() || await GlobalConfig.create({});
-    logger.info('Глобальная конфигурация инициализирована');
+    enhancedLogger.info('Глобальная конфигурация инициализирована');
 
     // Инициализируем i18n
     await i18nService.initialize();
-    logger.info('i18n инициализирован');
+    enhancedLogger.info('i18n инициализирован');
 
     // Настройка Passport
     await configurePassport(app);
-    logger.info('Passport настроен');
+    enhancedLogger.info('Passport настроен');
 
     // Health check route (до всех middleware)
     app.get('/health', (req, res) => {
-      res.json({ 
+      const health = {
         status: 'ok', 
         timestamp: new Date().toISOString(),
         mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-        version: process.env.npm_package_version || '1.0.0'
-      });
+        version: process.env.npm_package_version || '1.0.0',
+        circuitBreakers: Object.fromEntries(
+          Array.from(circuitBreakerManager.getAllStats()).map(([name, stats]) => [
+            name,
+            stats.state
+          ])
+        )
+      };
+      res.json(health);
     });
 
     // Middleware порядок важен!
@@ -234,13 +267,13 @@ async function initializeApp() {
     app.use('/api/support', supportRoutes);
     app.use('/api/admin', adminRoutes);
     app.use('/api/i18n', i18nRoutes);
-    logger.info('Routes загружены');
+    enhancedLogger.info('Routes загружены');
 
     // Swagger Documentation (только в разработке)
     if (process.env.NODE_ENV !== 'production') {
       const { setupSwagger } = require('@utils/swagger');
       setupSwagger(app);
-      logger.info('Swagger документация настроена на /api-docs');
+      enhancedLogger.info('Swagger документация настроена на /api-docs');
     }
 
     // Убеждаемся, что соединение стабильно перед инициализацией планов
@@ -249,21 +282,29 @@ async function initializeApp() {
     // Даем время для стабилизации соединения
     await new Promise(resolve => setTimeout(resolve, 5000));
     
-    // Инициализируем планы подписок
+    // Инициализируем планы подписок с retry
     try {
-      await initPlans();
-      logger.info('Планы подписок инициализированы');
+      await withRetry(
+        async () => {
+          await initPlans();
+          enhancedLogger.info('Планы подписок инициализированы');
+        },
+        {
+          maxRetries: 3,
+          baseDelay: 2000
+        }
+      );
     } catch (planError: any) {
-      logger.error('Ошибка инициализации планов:', { error: planError.message });
+      enhancedLogger.error('Ошибка инициализации планов:', planError);
       // Не останавливаем приложение, планы могут быть инициализированы позже
     }
 
     // Создаем административного пользователя, если нужно
     try {
       await createAdminIfNeeded();
-      logger.info('Проверка и создание административного пользователя выполнена');
+      enhancedLogger.info('Проверка и создание административного пользователя выполнена');
     } catch (adminError: any) {
-      logger.error('Ошибка при создании административного пользователя:', { error: adminError.message });
+      enhancedLogger.error('Ошибка при создании административного пользователя:', adminError);
       // Не останавливаем приложение, можно будет создать админа позже
     }
 
@@ -271,9 +312,9 @@ async function initializeApp() {
     try {
       cleanupOldFiles.start();
       cleanupOldChats.start();
-      logger.info('Cron задачи очистки запущены');
+      enhancedLogger.info('Cron задачи очистки запущены');
     } catch (cronError: any) {
-      logger.error('Ошибка запуска cron задач:', { error: cronError.message });
+      enhancedLogger.error('Ошибка запуска cron задач:', cronError);
     }
 
     // Error handling middleware (должны быть в самом конце)
@@ -297,7 +338,7 @@ async function initializeApp() {
 
     // Graceful shutdown
     const gracefulShutdown = async (signal: string) => {
-      logger.info(`Получен сигнал ${signal}, начинаем graceful shutdown...`);
+      enhancedLogger.info(`Получен сигнал ${signal}, начинаем graceful shutdown...`);
       
       try {
         // Останавливаем cron задачи
@@ -306,15 +347,15 @@ async function initializeApp() {
         
         // Закрываем MongoDB соединение
         await mongoose.connection.close();
-        logger.info('MongoDB соединение закрыто');
+        enhancedLogger.info('MongoDB соединение закрыто');
         
         // Закрываем Sentry
         await Sentry.close(2000);
-        logger.info('Sentry closed');
+        enhancedLogger.info('Sentry closed');
         
         process.exit(0);
       } catch (err: any) {
-        logger.error('Ошибка при graceful shutdown:', { error: err.message });
+        enhancedLogger.error('Ошибка при graceful shutdown:', err);
         process.exit(1);
       }
     };
@@ -325,23 +366,19 @@ async function initializeApp() {
 
     // Обработка необработанных исключений
     process.on('uncaughtException', (err) => {
-      logger.error('Uncaught Exception:', { error: err.message, stack: err.stack });
+      enhancedLogger.error('Uncaught Exception:', err);
       Sentry.captureException(err);
       gracefulShutdown('uncaughtException');
     });
 
     process.on('unhandledRejection', (reason: any, promise) => {
-      logger.error('Unhandled Rejection:', { 
-        reason: reason?.message || reason, 
-        stack: reason?.stack,
-        promise 
-      });
+      enhancedLogger.error('Unhandled Rejection:', reason);
       Sentry.captureException(reason);
     });
 
     // Запуск сервера
     const server = app.listen(cfg.port, '0.0.0.0', () => {
-      logger.info(`🚀 Сервер запущен на порту ${cfg.port}`, {
+      enhancedLogger.info(`🚀 Сервер запущен на порту ${cfg.port}`, {
         environment: process.env.NODE_ENV || 'development',
         nodeVersion: process.version,
         port: cfg.port
@@ -355,10 +392,7 @@ async function initializeApp() {
 
     return server;
   } catch (err: any) {
-    logger.error('❌ Критическая ошибка инициализации приложения:', { 
-      error: err.message, 
-      stack: err.stack 
-    });
+    enhancedLogger.error('❌ Критическая ошибка инициализации приложения:', err);
     Sentry.captureException(err);
     process.exit(1);
   }
@@ -366,6 +400,6 @@ async function initializeApp() {
 
 // Запуск приложения
 initializeApp().catch((err) => {
-  logger.error('❌ Не удалось запустить приложение:', { error: err.message });
+  enhancedLogger.error('❌ Не удалось запустить приложение:', err);
   process.exit(1);
 });

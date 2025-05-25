@@ -5,11 +5,14 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { User, UserDocument } from '@models/User';
 import { sendConfirmationEmail, sendResetPasswordEmail } from '@services/mailService';
-import { AuthenticatedRequest } from '@middleware/auth.middleware';
+import { AuthenticatedRequest, generateToken } from '@middleware/auth.middleware';
 import { I18nRequest } from '@middleware/i18n.middleware';
 import { trackEventManual } from '@middleware/analytics.middleware';
+import { blacklistService } from '@utils/token-blacklist';
+import { withRetry } from '@utils/retry';
+import { enhancedLogger } from '@utils/enhanced-logger';
+import { Sanitizer } from '@utils/sanitizer';
 import { getConfig } from '@config/config';
-import logger from '@utils/logger';
 import passport from 'passport';
 import { ApiResponse } from '@utils/response';
 
@@ -24,7 +27,7 @@ async function initializeAuth() {
       throw new Error('JWT_SECRET не найден в конфигурации');
     }
   } catch (err: any) {
-    logger.error('Ошибка инициализации JWT_SECRET:', { error: err.message, stack: err.stack });
+    enhancedLogger.error('Ошибка инициализации JWT_SECRET:', err);
     process.exit(1);
   }
 }
@@ -45,6 +48,7 @@ export const AuthController = {
   register: async (req: Request, res: Response) => {
     const i18nReq = req as Request & I18nRequest;
     const startTime = Date.now();
+    const requestLogger = (req as any).logger || enhancedLogger;
     
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -52,6 +56,12 @@ export const AuthController = {
     }
 
     const { name, email, password } = req.body;
+
+    // Дополнительная проверка на SQL/NoSQL инъекции
+    if (Sanitizer.containsSqlInjection(email) || Sanitizer.containsNoSqlInjection(email)) {
+      requestLogger.warn('Попытка SQL/NoSQL инъекции при регистрации', { email });
+      return ApiResponse.sendError(res, await i18nReq.t('errors.validation_error'), null, 400);
+    }
 
     if (!email || !password) {
       return ApiResponse.sendError(res, await i18nReq.t('errors.email_password_required'), null, 400);
@@ -64,7 +74,7 @@ export const AuthController = {
     try {
       const existing = await User.findOne({ email }).lean() as UserDocument | null;
       if (existing) {
-        logger.warn(`Попытка повторной регистрации: ${email}`);
+        requestLogger.warn(`Попытка повторной регистрации: ${email}`);
         return ApiResponse.sendError(res, await i18nReq.t('errors.email_already_registered'), null, 400);
       }
 
@@ -82,7 +92,16 @@ export const AuthController = {
       });
 
       await user.save();
-      await sendConfirmationEmail(email, confirmToken);
+      
+      // Отправка email с retry
+      await withRetry(
+        () => sendConfirmationEmail(email, confirmToken),
+        {
+          maxRetries: 3,
+          baseDelay: 1000,
+          retryCondition: (error) => error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT'
+        }
+      );
       
       // Трекинг события регистрации
       await trackEventManual(
@@ -98,14 +117,14 @@ export const AuthController = {
         { duration_ms: Date.now() - startTime }
       );
       
-      logger.info(`Новый пользователь зарегистрирован: ${email}`);
+      requestLogger.info(`Новый пользователь зарегистрирован: ${email}`);
       return ApiResponse.send(res, null, await i18nReq.t('success.registration_successful'), 201);
     } catch (err: any) {
       if (err.code === 11000) {
-        logger.warn(`Дублирование email при регистрации: ${email}`);
+        requestLogger.warn(`Дублирование email при регистрации: ${email}`);
         return ApiResponse.sendError(res, await i18nReq.t('errors.email_already_registered'), null, 400);
       }
-      logger.error('Ошибка регистрации:', { error: err.message, stack: err.stack });
+      requestLogger.error('Ошибка регистрации:', err);
       return ApiResponse.sendError(res, await i18nReq.t('errors.internal_error'), err.message, 500);
     }
   },
@@ -115,6 +134,7 @@ export const AuthController = {
    */
   confirmEmail: async (req: Request, res: Response) => {
     const i18nReq = req as Request & I18nRequest;
+    const requestLogger = (req as any).logger || enhancedLogger;
     const { token } = req.params;
 
     if (!token) {
@@ -145,10 +165,10 @@ export const AuthController = {
         user._id?.toString()
       );
       
-      logger.info(`Email подтверждён для пользователя: ${user.email}`);
+      requestLogger.info(`Email подтверждён для пользователя: ${user.email}`);
       return ApiResponse.send(res, null, await i18nReq.t('success.email_confirmed'));
     } catch (err: any) {
-      logger.error('Ошибка подтверждения email:', { error: err.message, stack: err.stack });
+      requestLogger.error('Ошибка подтверждения email:', err);
       return ApiResponse.sendError(res, await i18nReq.t('errors.internal_error'), err.message, 500);
     }
   },
@@ -159,6 +179,7 @@ export const AuthController = {
   login: async (req: Request, res: Response) => {
     const i18nReq = req as Request & I18nRequest;
     const startTime = Date.now();
+    const requestLogger = (req as any).logger || enhancedLogger;
     
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -185,6 +206,9 @@ export const AuthController = {
             user_agent: req.headers['user-agent']
           }
         );
+        
+        // Добавляем небольшую задержку для защиты от timing атак
+        await new Promise(resolve => setTimeout(resolve, 500));
         return ApiResponse.sendError(res, await i18nReq.t('errors.invalid_credentials'), null, 400);
       }
 
@@ -210,6 +234,9 @@ export const AuthController = {
           },
           user._id?.toString()
         );
+        
+        // Добавляем небольшую задержку для защиты от timing атак
+        await new Promise(resolve => setTimeout(resolve, 500));
         return ApiResponse.sendError(res, await i18nReq.t('errors.invalid_credentials'), null, 400);
       }
 
@@ -217,11 +244,8 @@ export const AuthController = {
         throw new Error('ID пользователя отсутствует');
       }
 
-      const token = jwt.sign(
-        { id: user._id.toString(), email: user.email, roles: user.roles },
-        JWT_SECRET,
-        { expiresIn: '7d' }
-      );
+      // Генерируем токен с улучшенной безопасностью
+      const token = await generateToken(user);
 
       // Трекинг успешного входа
       await trackEventManual(
@@ -237,13 +261,49 @@ export const AuthController = {
         { duration_ms: Date.now() - startTime }
       );
 
-      logger.info(`Пользователь вошёл в систему: ${email}`);
+      requestLogger.info(`Пользователь вошёл в систему: ${email}`);
       return ApiResponse.send(res, {
         token,
         user: { id: user._id.toString(), email: user.email, roles: user.roles }
       });
     } catch (err: any) {
-      logger.error('Ошибка входа:', { error: err.message, stack: err.stack });
+      requestLogger.error('Ошибка входа:', err);
+      return ApiResponse.sendError(res, await i18nReq.t('errors.internal_error'), err.message, 500);
+    }
+  },
+
+  /**
+   * Выход из системы
+   */
+  logout: async (req: Request, res: Response) => {
+    const i18nReq = req as Request & I18nRequest;
+    const requestLogger = (req as any).logger || enhancedLogger;
+    const token = (req as any).token;
+
+    try {
+      // Добавляем токен в черный список
+      if (token) {
+        await blacklistService.addToBlacklist(token, 'logout');
+        requestLogger.info('Токен добавлен в черный список при logout');
+      }
+
+      // Трекинг выхода
+      const authReq = req as AuthenticatedRequest;
+      if (authReq.user?.id) {
+        await trackEventManual(
+          'logout',
+          'user',
+          { 
+            ip_address: req.ip,
+            user_agent: req.headers['user-agent']
+          },
+          authReq.user.id
+        );
+      }
+
+      return ApiResponse.send(res, null, await i18nReq.t('success.logout'));
+    } catch (err: any) {
+      requestLogger.error('Ошибка при logout:', err);
       return ApiResponse.sendError(res, await i18nReq.t('errors.internal_error'), err.message, 500);
     }
   },
@@ -253,6 +313,7 @@ export const AuthController = {
    */
   requestPasswordReset: async (req: Request, res: Response) => {
     const i18nReq = req as Request & I18nRequest;
+    const requestLogger = (req as any).logger || enhancedLogger;
     const { email } = req.body;
 
     if (!email) {
@@ -263,6 +324,8 @@ export const AuthController = {
       const user = await User.findOne({ email }) as UserDocument | null;
       if (!user) {
         // Не раскрываем информацию о том, существует ли пользователь
+        // Добавляем задержку для имитации обработки
+        await new Promise(resolve => setTimeout(resolve, 1000));
         return ApiResponse.send(res, null, await i18nReq.t('success.password_reset_sent'));
       }
 
@@ -271,7 +334,15 @@ export const AuthController = {
       user.resetTokenExpires = new Date(Date.now() + 3600000);
       await user.save();
 
-      await sendResetPasswordEmail(email, token);
+      // Отправка email с retry
+      await withRetry(
+        () => sendResetPasswordEmail(email, token),
+        {
+          maxRetries: 3,
+          baseDelay: 1000,
+          retryCondition: (error) => error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT'
+        }
+      );
       
       // Трекинг запроса сброса пароля
       await trackEventManual(
@@ -285,10 +356,10 @@ export const AuthController = {
         user._id?.toString()
       );
       
-      logger.info(`Запрошен сброс пароля для: ${email}`);
+      requestLogger.info(`Запрошен сброс пароля для: ${email}`);
       return ApiResponse.send(res, null, await i18nReq.t('success.password_reset_sent'));
     } catch (err: any) {
-      logger.error('Ошибка запроса сброса пароля:', { error: err.message, stack: err.stack });
+      requestLogger.error('Ошибка запроса сброса пароля:', err);
       return ApiResponse.sendError(res, await i18nReq.t('errors.internal_error'), err.message, 500);
     }
   },
@@ -298,6 +369,7 @@ export const AuthController = {
    */
   resetPassword: async (req: Request, res: Response) => {
     const i18nReq = req as Request & I18nRequest;
+    const requestLogger = (req as any).logger || enhancedLogger;
     const { token } = req.params;
     const { password } = req.body;
 
@@ -328,6 +400,10 @@ export const AuthController = {
       user.resetTokenExpires = undefined;
       await user.save();
 
+      // Добавляем все активные токены пользователя в черный список
+      // (в реальном приложении нужно хранить активные токены)
+      requestLogger.info('Пароль изменен, старые токены должны быть инвалидированы');
+
       // Трекинг сброса пароля
       await trackEventManual(
         'password_reset_completed',
@@ -340,10 +416,10 @@ export const AuthController = {
         user._id?.toString()
       );
 
-      logger.info(`Пароль сброшен для пользователя: ${user.email}`);
+      requestLogger.info(`Пароль сброшен для пользователя: ${user.email}`);
       return ApiResponse.send(res, null, await i18nReq.t('success.password_changed'));
     } catch (err: any) {
-      logger.error('Ошибка сброса пароля:', { error: err.message, stack: err.stack });
+      requestLogger.error('Ошибка сброса пароля:', err);
       return ApiResponse.sendError(res, await i18nReq.t('errors.internal_error'), err.message, 500);
     }
   },
@@ -359,6 +435,8 @@ export const AuthController = {
    * Обратный вызов для аутентификации через Google
    */
   googleAuthCallback: async (req: Request, res: Response) => {
+    const requestLogger = (req as any).logger || enhancedLogger;
+    
     try {
       const user = req.user as UserDocument | null;
       if (!user) {
@@ -369,11 +447,8 @@ export const AuthController = {
         throw new Error('ID пользователя отсутствует');
       }
 
-      const token = jwt.sign(
-        { id: user._id.toString(), email: user.email, roles: user.roles },
-        JWT_SECRET,
-        { expiresIn: '7d' }
-      );
+      // Генерируем токен с улучшенной безопасностью
+      const token = await generateToken(user);
 
       // Трекинг OAuth входа
       await trackEventManual(
@@ -387,10 +462,10 @@ export const AuthController = {
         user._id.toString()
       );
 
-      logger.info(`Пользователь вошёл через Google: ${user.email}`);
+      requestLogger.info(`Пользователь вошёл через Google: ${user.email}`);
       res.redirect(`${cfg.frontendUrl}/auth/callback?token=${token}`);
     } catch (err: any) {
-      logger.error('Ошибка Google OAuth:', { error: err.message, stack: err.stack });
+      requestLogger.error('Ошибка Google OAuth:', err);
       return ApiResponse.sendError(res, 'Ошибка аутентификации через Google', err.message, 500);
     }
   },
@@ -402,7 +477,7 @@ export const AuthController = {
     try {
       return ApiResponse.sendError(res, 'Apple Sign In временно недоступен', null, 503);
     } catch (err: any) {
-      logger.error('Ошибка Apple Sign In:', { error: err.message, stack: err.stack });
+      enhancedLogger.error('Ошибка Apple Sign In:', err);
       return ApiResponse.sendError(res, 'Ошибка сервера', null, 500);
     }
   },
@@ -414,7 +489,7 @@ export const AuthController = {
     try {
       return ApiResponse.sendError(res, 'Apple Sign In временно недоступен', null, 503);
     } catch (err: any) {
-      logger.error('Ошибка Apple OAuth:', { error: err.message, stack: err.stack });
+      enhancedLogger.error('Ошибка Apple OAuth:', err);
       return ApiResponse.sendError(res, 'Ошибка аутентификации через Apple', err.message, 500);
     }
   }
