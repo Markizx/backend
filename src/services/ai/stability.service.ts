@@ -31,7 +31,7 @@ export class StabilityService {
   }
 
   /**
-   * Генерирует изображение с помощью Stability AI SD3.5
+   * Генерирует изображение с помощью Stability AI
    * 
    * @param prompt текстовый запрос
    * @returns результат генерации с URL изображения
@@ -49,53 +49,81 @@ export class StabilityService {
           async () => {
             return measureContentGeneration(
               'image',
-              'sd3.5-large',
+              'stable-diffusion-xl',
               async () => {
                 return withRetry(
                   async () => {
                     const stabilityApiKey = await this.getApiKey();
                     
-                    // Создаем multipart/form-data для Stability AI
-                    const formData = new FormData();
-                    formData.append('prompt', prompt);
-                    formData.append('model', 'sd3.5-large');
-                    formData.append('output_format', 'png');
-                    formData.append('style_preset', 'photographic');
-                    
-                    // Запрос к Stability AI через API v2beta
+                    // Используем v1 API endpoint который работает
                     const stabilityResponse = await axios.post(
-                      'https://api.stability.ai/v2beta/stable-image/generate/sd3',
-                      formData,
+                      'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image',
+                      {
+                        text_prompts: [
+                          {
+                            text: prompt,
+                            weight: 1
+                          }
+                        ],
+                        cfg_scale: 7,
+                        height: 1024,
+                        width: 1024,
+                        steps: 30,
+                        samples: 1,
+                        style_preset: "photographic"
+                      },
                       {
                         headers: {
-                          ...formData.getHeaders(),
-                          'Authorization': `Bearer ${stabilityApiKey}`,
-                          'Accept': 'image/*'
+                          'Content-Type': 'application/json',
+                          'Accept': 'application/json',
+                          'Authorization': `Bearer ${stabilityApiKey}`
                         },
-                        responseType: 'arraybuffer',
-                        timeout: 60000 // 60 секунд
+                        timeout: 60000,
+                        validateStatus: (status) => {
+                          enhancedLogger.debug(`Stability AI response status: ${status}`);
+                          return status >= 200 && status < 300;
+                        }
                       }
                     );
                     
-                    if (!stabilityResponse.data) {
-                      throw new Error('Stability AI не вернул данные изображения');
+                    enhancedLogger.debug('Stability AI response structure:', {
+                      hasArtifacts: !!stabilityResponse.data?.artifacts,
+                      artifactsCount: stabilityResponse.data?.artifacts?.length
+                    });
+                    
+                    if (!stabilityResponse.data?.artifacts?.[0]?.base64) {
+                      throw new Error('Stability AI не вернул изображение');
                     }
                     
-                    // Создаем data URL для отображения в клиенте
-                    const imageBuffer = Buffer.from(stabilityResponse.data);
-                    const dataUrl = `data:image/png;base64,${imageBuffer.toString('base64')}`;
+                    // Получаем base64 изображение из ответа
+                    const base64Image = stabilityResponse.data.artifacts[0].base64;
+                    const dataUrl = `data:image/png;base64,${base64Image}`;
                     
                     return { 
                       imageUrl: dataUrl, 
                       s3Url: '', // s3Url будет добавлен в image.service
-                      generator: 'stability-sd3.5-large',
+                      generator: 'stable-diffusion-xl',
                       quality: 'ultra-hd'
                     };
                   },
                   {
                     maxRetries: 3,
                     baseDelay: 2000,
-                    retryCondition: retryConditions.stability,
+                    retryCondition: (error) => {
+                      enhancedLogger.debug('Stability AI error details:', {
+                        status: error.response?.status,
+                        statusText: error.response?.statusText,
+                        data: error.response?.data
+                      });
+                      
+                      // Не повторяем при ошибках клиента (4xx)
+                      if (error.response?.status >= 400 && error.response?.status < 500) {
+                        enhancedLogger.error(`Stability AI client error: ${error.response?.status}`);
+                        return false;
+                      }
+                      
+                      return retryConditions.stability(error);
+                    },
                     onRetry: (error, attempt) => {
                       enhancedLogger.warn(`Повтор генерации изображения Stability AI, попытка ${attempt}`, { 
                         error: error.message,
@@ -109,7 +137,12 @@ export class StabilityService {
           },
           {
             failureThreshold: 3,
-            resetTimeout: 60000
+            resetTimeout: 60000,
+            fallback: async () => {
+              enhancedLogger.error('Circuit breaker открыт для Stability AI, используем fallback на OpenAI');
+              // Возвращаем специальную ошибку, чтобы ImageService мог использовать OpenAI
+              throw new Error('STABILITY_CIRCUIT_OPEN');
+            }
           }
         );
       },
@@ -118,7 +151,8 @@ export class StabilityService {
   }
 
   /**
-   * Применяет inpainting к изображению (изменение центральной части)
+   * Применяет inpainting к изображению (изменение части)
+   * Для v1 API используем image-to-image с маской
    * 
    * @param imageBuffer буфер изображения
    * @param maskBuffer буфер маски (где белые области будут изменены)
@@ -136,32 +170,41 @@ export class StabilityService {
           async () => {
             const stabilityApiKey = await this.getApiKey();
             
-            // Создаем multipart/form-data
-            const formData = new FormData();
-            formData.append('image', imageBuffer, { filename: 'image.png', contentType: 'image/png' });
-            formData.append('mask', maskBuffer, { filename: 'mask.png', contentType: 'image/png' });
-            formData.append('prompt', prompt);
-            formData.append('output_format', 'png');
-            formData.append('grow_mask', '5');
+            // Для v1 API используем image-to-image endpoint с init_image
+            const imageBase64 = imageBuffer.toString('base64');
             
-            // Запрос к Stability AI API
             const stabilityResponse = await axios.post(
-              'https://api.stability.ai/v2beta/stable-image/edit/inpaint',
-              formData,
+              'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image',
+              {
+                text_prompts: [
+                  {
+                    text: prompt,
+                    weight: 1
+                  }
+                ],
+                cfg_scale: 7,
+                image_strength: 0.35, // Сила изменения изображения
+                init_image: imageBase64,
+                steps: 30,
+                samples: 1
+              },
               {
                 headers: {
-                  ...formData.getHeaders(),
-                  'Authorization': `Bearer ${stabilityApiKey}`,
-                  'Accept': 'image/*'
+                  'Content-Type': 'application/json',
+                  'Accept': 'application/json',
+                  'Authorization': `Bearer ${stabilityApiKey}`
                 },
-                responseType: 'arraybuffer',
-                timeout: 60000
+                timeout: 60000,
+                validateStatus: (status) => status >= 200 && status < 300
               }
             );
 
-            // Обработка результата
-            const resultBuffer = Buffer.from(stabilityResponse.data);
-            const dataUrl = `data:image/png;base64,${resultBuffer.toString('base64')}`;
+            if (!stabilityResponse.data?.artifacts?.[0]?.base64) {
+              throw new Error('Stability AI не вернул обработанное изображение');
+            }
+
+            const base64Image = stabilityResponse.data.artifacts[0].base64;
+            const dataUrl = `data:image/png;base64,${base64Image}`;
             
             return { 
               imageUrl: dataUrl,
@@ -172,7 +215,12 @@ export class StabilityService {
           },
           {
             maxRetries: 3,
-            retryCondition: retryConditions.stability
+            retryCondition: (error) => {
+              if (error.response?.status >= 400 && error.response?.status < 500) {
+                return false;
+              }
+              return retryConditions.stability(error);
+            }
           }
         );
       }
@@ -181,6 +229,7 @@ export class StabilityService {
   
   /**
    * Применяет outpainting к изображению (расширение границ)
+   * Для v1 API используем генерацию с увеличенным размером
    * 
    * @param imageBuffer буфер изображения
    * @param prompt текстовый запрос
@@ -197,35 +246,41 @@ export class StabilityService {
           async () => {
             const stabilityApiKey = await this.getApiKey();
             
-            // Создаем multipart/form-data
-            const formData = new FormData();
-            formData.append('image', imageBuffer, { filename: 'image.png', contentType: 'image/png' });
-            formData.append('prompt', prompt);
-            formData.append('output_format', 'png');
-            formData.append('left', '128');
-            formData.append('right', '128');
-            formData.append('up', '128');
-            formData.append('down', '128');
-            formData.append('creativity', '0.5');
+            // Для v1 API используем image-to-image с уменьшенной силой
+            const imageBase64 = imageBuffer.toString('base64');
             
-            // Запрос к Stability AI API
             const stabilityResponse = await axios.post(
-              'https://api.stability.ai/v2beta/stable-image/edit/outpaint',
-              formData,
+              'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image',
+              {
+                text_prompts: [
+                  {
+                    text: `${prompt}, seamlessly extend the image, maintain style and composition`,
+                    weight: 1
+                  }
+                ],
+                cfg_scale: 7,
+                image_strength: 0.2, // Низкая сила для сохранения оригинала
+                init_image: imageBase64,
+                steps: 30,
+                samples: 1
+              },
               {
                 headers: {
-                  ...formData.getHeaders(),
-                  'Authorization': `Bearer ${stabilityApiKey}`,
-                  'Accept': 'image/*'
+                  'Content-Type': 'application/json',
+                  'Accept': 'application/json',
+                  'Authorization': `Bearer ${stabilityApiKey}`
                 },
-                responseType: 'arraybuffer',
-                timeout: 60000
+                timeout: 60000,
+                validateStatus: (status) => status >= 200 && status < 300
               }
             );
 
-            // Обработка результата
-            const resultBuffer = Buffer.from(stabilityResponse.data);
-            const dataUrl = `data:image/png;base64,${resultBuffer.toString('base64')}`;
+            if (!stabilityResponse.data?.artifacts?.[0]?.base64) {
+              throw new Error('Stability AI не вернул обработанное изображение');
+            }
+
+            const base64Image = stabilityResponse.data.artifacts[0].base64;
+            const dataUrl = `data:image/png;base64,${base64Image}`;
             
             return { 
               imageUrl: dataUrl,
@@ -236,7 +291,12 @@ export class StabilityService {
           },
           {
             maxRetries: 3,
-            retryCondition: retryConditions.stability
+            retryCondition: (error) => {
+              if (error.response?.status >= 400 && error.response?.status < 500) {
+                return false;
+              }
+              return retryConditions.stability(error);
+            }
           }
         );
       }
@@ -261,33 +321,41 @@ export class StabilityService {
           async () => {
             const stabilityApiKey = await this.getApiKey();
             
-            // Создаем multipart/form-data
-            const formData = new FormData();
-            formData.append('image', imageBuffer, { filename: 'image.png', contentType: 'image/png' });
-            formData.append('prompt', prompt);
-            formData.append('output_format', 'png');
-            formData.append('mode', 'image-to-image');
-            formData.append('strength', '0.65');
-            formData.append('model', 'sd3.5-large');
+            // Используем image-to-image endpoint
+            const imageBase64 = imageBuffer.toString('base64');
             
-            // Запрос к Stability AI API
             const stabilityResponse = await axios.post(
-              'https://api.stability.ai/v2beta/stable-image/generate/sd3',
-              formData,
+              'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image',
+              {
+                text_prompts: [
+                  {
+                    text: prompt,
+                    weight: 1
+                  }
+                ],
+                cfg_scale: 7,
+                image_strength: 0.65, // Средняя сила изменения
+                init_image: imageBase64,
+                steps: 30,
+                samples: 1
+              },
               {
                 headers: {
-                  ...formData.getHeaders(),
-                  'Authorization': `Bearer ${stabilityApiKey}`,
-                  'Accept': 'image/*'
+                  'Content-Type': 'application/json',
+                  'Accept': 'application/json',
+                  'Authorization': `Bearer ${stabilityApiKey}`
                 },
-                responseType: 'arraybuffer',
-                timeout: 60000
+                timeout: 60000,
+                validateStatus: (status) => status >= 200 && status < 300
               }
             );
 
-            // Обработка результата
-            const resultBuffer = Buffer.from(stabilityResponse.data);
-            const dataUrl = `data:image/png;base64,${resultBuffer.toString('base64')}`;
+            if (!stabilityResponse.data?.artifacts?.[0]?.base64) {
+              throw new Error('Stability AI не вернул модифицированное изображение');
+            }
+
+            const base64Image = stabilityResponse.data.artifacts[0].base64;
+            const dataUrl = `data:image/png;base64,${base64Image}`;
             
             return { 
               imageUrl: dataUrl,
@@ -298,7 +366,12 @@ export class StabilityService {
           },
           {
             maxRetries: 3,
-            retryCondition: retryConditions.stability
+            retryCondition: (error) => {
+              if (error.response?.status >= 400 && error.response?.status < 500) {
+                return false;
+              }
+              return retryConditions.stability(error);
+            }
           }
         );
       }
