@@ -135,6 +135,20 @@ export class GrokService {
   static async getChatResponse(messages: Array<{role: string, content: string}>): Promise<string> {
     enhancedLogger.info(`Отправка запроса в Grok AI для чата`);
     
+    // Проверяем и фильтруем сообщения
+    const validMessages = messages.filter(msg => msg && msg.content && msg.content.trim().length > 0);
+    
+    if (validMessages.length === 0) {
+      enhancedLogger.error('Нет валидных сообщений для отправки в Grok AI');
+      throw new Error('Нет сообщений для отправки');
+    }
+    
+    // Логируем сообщения для отладки
+    enhancedLogger.debug('Сообщения для Grok AI:', {
+      count: validMessages.length,
+      messages: validMessages.map(m => ({ role: m.role, length: m.content.length }))
+    });
+    
     // Для чата не используем кэш, так как контекст уникален
     return circuitBreakerManager.execute(
       'grok-chat',
@@ -147,9 +161,26 @@ export class GrokService {
               async () => {
                 const grokApiKey = await this.getApiKey();
                 
+                // Добавляем системное сообщение если его нет
+                const messagesWithSystem = validMessages[0]?.role === 'system' 
+                  ? validMessages 
+                  : [
+                      {
+                        role: 'system',
+                        content: 'You are a helpful AI assistant. Respond in the same language as the user\'s messages.'
+                      },
+                      ...validMessages
+                    ];
+                
+                enhancedLogger.debug('Отправка запроса в Grok API:', {
+                  url: 'https://api.x.ai/v1/chat/completions',
+                  messageCount: messagesWithSystem.length,
+                  model: 'grok-3'
+                });
+                
                 const grokResponse = await axios.post('https://api.x.ai/v1/chat/completions', {
-                  messages,
-                  model: 'grok-3-beta',
+                  messages: messagesWithSystem,
+                  model: 'grok-3', // Используем самую мощную модель Grok-3
                   max_tokens: 2000,
                   temperature: 0.7,
                   stream: false
@@ -158,11 +189,24 @@ export class GrokService {
                     'Authorization': `Bearer ${grokApiKey}`,
                     'Content-Type': 'application/json'
                   },
-                  timeout: 30000
+                  timeout: 30000,
+                  validateStatus: (status) => {
+                    enhancedLogger.debug(`Grok API response status: ${status}`);
+                    return status >= 200 && status < 300;
+                  }
+                });
+                
+                enhancedLogger.debug('Grok API ответ:', {
+                  status: grokResponse.status,
+                  hasChoices: !!grokResponse.data?.choices,
+                  choicesCount: grokResponse.data?.choices?.length
                 });
 
                 const aiResponse = grokResponse.data?.choices?.[0]?.message?.content;
                 if (!aiResponse) {
+                  enhancedLogger.error('Grok AI не вернул ответ', {
+                    responseData: grokResponse.data
+                  });
                   throw new Error('Grok AI не вернул ответ');
                 }
                 
@@ -172,6 +216,14 @@ export class GrokService {
                 maxRetries: 3,
                 baseDelay: 1000,
                 retryCondition: (error) => {
+                  // Логируем детали ошибки
+                  enhancedLogger.debug('Grok API error details:', {
+                    status: error.response?.status,
+                    statusText: error.response?.statusText,
+                    data: error.response?.data,
+                    message: error.message
+                  });
+                  
                   // Специфичные условия retry для Grok chat
                   if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
                     return true;
@@ -187,6 +239,10 @@ export class GrokService {
                   }
                   // Не повторяем при ошибках клиента (4xx кроме 429)
                   if (error.response?.status >= 400 && error.response?.status < 500) {
+                    enhancedLogger.error('Grok API client error, не повторяем', {
+                      status: error.response?.status,
+                      error: error.response?.data
+                    });
                     return false;
                   }
                   return false;
@@ -194,7 +250,8 @@ export class GrokService {
                 onRetry: (error, attempt) => {
                   enhancedLogger.warn(`Повтор запроса к Grok chat, попытка ${attempt}`, { 
                     error: error.message,
-                    status: error.response?.status 
+                    status: error.response?.status,
+                    responseData: error.response?.data
                   });
                 }
               }

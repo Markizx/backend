@@ -18,6 +18,32 @@ export class ChatService {
   static async getGrokResponse(messages: Array<{role: string, content: string}>) {
     enhancedLogger.info(`Отправка запроса в Grok AI`);
     
+    // Фильтруем и проверяем сообщения
+    const validMessages = messages.filter(msg => {
+      return msg && 
+             msg.content && 
+             typeof msg.content === 'string' && 
+             msg.content.trim().length > 0 &&
+             msg.role && 
+             ['user', 'assistant', 'system'].includes(msg.role);
+    });
+    
+    // Логируем для отладки
+    enhancedLogger.debug('Проверка сообщений перед отправкой:', {
+      originalCount: messages.length,
+      validCount: validMessages.length,
+      messages: validMessages.map(m => ({ 
+        role: m.role, 
+        contentLength: m.content.length,
+        contentPreview: m.content.substring(0, 50) 
+      }))
+    });
+    
+    if (validMessages.length === 0) {
+      enhancedLogger.error('Нет валидных сообщений после фильтрации');
+      throw new Error('Нет валидных сообщений для отправки');
+    }
+    
     const startTime = Date.now();
     
     try {
@@ -27,7 +53,7 @@ export class ChatService {
         async () => {
           return withRetry(
             async () => {
-              return await GrokService.getChatResponse(messages);
+              return await GrokService.getChatResponse(validMessages);
             },
             {
               maxRetries: 3,

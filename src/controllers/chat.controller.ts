@@ -227,19 +227,29 @@ export const ChatController = {
         role: 'user',
       }], { session });
 
+      // Увеличиваем счетчик использования чата
+      await User.updateOne({ _id: userId }, { $inc: { chatUsed: 1 } }, { session });
+
       // Получаем последние сообщения для контекста
       const recentMessages = await Message.find({ chat: id })
         .sort({ timestamp: -1 })
         .limit(10)
-        .sort({ timestamp: 1 });
+        .session(session);
 
-      // Формируем запрос к Grok AI
-      const messages = recentMessages.map(msg => ({
+      // Переворачиваем массив, чтобы сообщения были в хронологическом порядке
+      const chronologicalMessages = recentMessages.reverse();
+
+      // Формируем массив сообщений для Grok API
+      const messages = chronologicalMessages.map(msg => ({
         role: msg.role,
         content: msg.content
       }));
 
       logger.info(`Отправка запроса в Grok AI для чата ${id}, пользователь ${userId}`);
+      logger.debug('Сообщения для отправки в Grok:', {
+        count: messages.length,
+        messages: messages.map(m => ({ role: m.role, contentLength: m.content.length }))
+      });
       
       try {
         // Используем ChatService для получения ответа от Grok AI
@@ -275,8 +285,7 @@ export const ChatController = {
           }
         }, await authReq.t('success.message_sent'));
       } catch (grokError: any) {
-        // В случае ошибки запроса к AI мы все равно хотим сохранить сообщение пользователя
-        // Откат транзакции и создание новой транзакции
+        // В случае ошибки запроса к AI откатываем транзакцию и создаем новую
         await session.abortTransaction();
         session.startTransaction();
 
@@ -286,6 +295,13 @@ export const ChatController = {
           chatId: id
         });
         
+        // Все равно сохраняем сообщение пользователя
+        const savedUserMessage = await Message.create([{
+          chat: id,
+          content: message.trim(),
+          role: 'user',
+        }], { session });
+        
         // Создаем сообщение с ошибкой
         const errorMessage = await Message.create([{
           chat: id,
@@ -293,6 +309,8 @@ export const ChatController = {
           role: 'assistant',
         }], { session });
         
+        // Обновляем счетчик и время чата
+        await User.updateOne({ _id: userId }, { $inc: { chatUsed: 1 } }, { session });
         chat.updatedAt = new Date();
         await chat.save({ session });
         
@@ -300,10 +318,10 @@ export const ChatController = {
         
         return ApiResponse.sendError(res, await authReq.t('chat.ai_error'), {
           userMessage: {
-            _id: userMessage[0]._id,
-            content: userMessage[0].content,
-            role: userMessage[0].role,
-            timestamp: userMessage[0].timestamp
+            _id: savedUserMessage[0]._id,
+            content: savedUserMessage[0].content,
+            role: savedUserMessage[0].role,
+            timestamp: savedUserMessage[0].timestamp
           },
           assistantMessage: {
             _id: errorMessage[0]._id,
