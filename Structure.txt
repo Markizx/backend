@@ -26,12 +26,14 @@ backend
     │       support.controller.ts
     │
     ├───docs
+    │       admin.swagger.ts
     │       auth.swagger.ts
     │       chat.swagger.ts
     │       generate.swagger.ts
     │       i18n.swagger.ts
     │       subscription.swagger.ts
     │       support.swagger.ts
+    │       user.swagger.ts
     │
     ├───i18n
     │   │   cache.service.ts
@@ -51,6 +53,7 @@ backend
     │       objectId.middleware.ts
     │       rate.limiter.ts
     │       role.middleware.ts
+    │       security.middleware.ts
     │
     ├───models
     │       Analytics.ts
@@ -96,12 +99,17 @@ backend
     │
     └───utils
             asyncHandler.ts
+            circuit-breaker.ts
             cleanup.service.ts
             createAdmin.ts
+            enhanced-logger.ts
             getSecrets.ts
             logger.ts
             response.ts
+            retry.ts
+            sanitizer.ts
             swagger.ts
+            token-blacklist.ts
             
             https://api.contentstar.app/api-docs
             ssh -i C:\Users\PC\Desktop\contentstar.pem ubuntu@13.237.156.187
@@ -109,6 +117,6 @@ backend
             backend url = https://api.contentstar.app
             backend on EC2 
             db mongo db atlas =mongodb+srv://contentstaruser:Ambrakadabra8826@@contentstarcluster.mongodb.net/contentstar?retryWrites=true&w=majority
-            frontend url: contenstar.app 
+            frontend url: contentstar.app 
             frontend  be soon on aws amplify 
             
