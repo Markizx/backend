@@ -153,7 +153,7 @@ export class StabilityService {
 
   /**
    * Применяет inpainting к изображению (изменение части)
-   * Для v1 API используем image-to-image/masking endpoint
+   * Для v1 API используем image-to-image endpoint с FormData
    * 
    * @param imageBuffer буфер изображения
    * @param maskBuffer буфер маски (где белые области будут изменены)
@@ -171,7 +171,7 @@ export class StabilityService {
           async () => {
             const stabilityApiKey = await this.getApiKey();
             
-            // Используем FormData для v1 API masking endpoint
+            // Используем FormData для v1 API
             const form = new FormData();
             
             // Подготавливаем изображения
@@ -179,34 +179,24 @@ export class StabilityService {
               .resize(1024, 1024, { fit: 'fill' })
               .png()
               .toBuffer();
-              
-            const processedMask = await sharp(maskBuffer)
-              .resize(1024, 1024, { fit: 'fill' })
-              .png()
-              .toBuffer();
             
-            // Добавляем файлы в форму
+            // Добавляем файлы и параметры в форму
             form.append('init_image', processedImage, {
               filename: 'image.png',
-              contentType: 'image/png'
-            });
-            
-            form.append('mask_image', processedMask, {
-              filename: 'mask.png', 
               contentType: 'image/png'
             });
             
             form.append('text_prompts[0][text]', prompt);
             form.append('text_prompts[0][weight]', '1');
             form.append('cfg_scale', '7');
-            form.append('clip_guidance_preset', 'FAST_BLUE');
+            form.append('image_strength', '0.35');
             form.append('samples', '1');
             form.append('steps', '30');
             
             const formHeaders = form.getHeaders();
             
             const stabilityResponse = await axios.post(
-              'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image/masking',
+              'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image',
               form,
               {
                 headers: {
@@ -216,14 +206,14 @@ export class StabilityService {
                 },
                 timeout: 60000,
                 validateStatus: (status) => {
-                  enhancedLogger.debug(`Stability AI masking response status: ${status}`);
+                  enhancedLogger.debug(`Stability AI inpainting response status: ${status}`);
                   return status >= 200 && status < 300;
                 }
               }
             );
 
             if (!stabilityResponse.data?.artifacts?.[0]?.base64) {
-              enhancedLogger.error('Stability AI masking response:', stabilityResponse.data);
+              enhancedLogger.error('Stability AI inpainting response:', stabilityResponse.data);
               throw new Error('Stability AI не вернул обработанное изображение');
             }
 
@@ -241,7 +231,7 @@ export class StabilityService {
             maxRetries: 3,
             retryCondition: (error) => {
               if (error.response?.status >= 400 && error.response?.status < 500) {
-                enhancedLogger.error('Stability AI masking client error:', {
+                enhancedLogger.error('Stability AI inpainting client error:', {
                   status: error.response?.status,
                   data: error.response?.data
                 });
@@ -257,7 +247,7 @@ export class StabilityService {
   
   /**
    * Применяет outpainting к изображению (расширение границ)
-   * Для v1 API используем image-to-image с правильными параметрами
+   * Для v1 API используем image-to-image с FormData
    * 
    * @param imageBuffer буфер изображения
    * @param prompt текстовый запрос
@@ -297,27 +287,29 @@ export class StabilityService {
             .png()
             .toBuffer();
             
-            // Конвертируем в base64
-            const imageBase64 = outpaintImage.toString('base64');
+            // Используем FormData
+            const form = new FormData();
+            
+            form.append('init_image', outpaintImage, {
+              filename: 'image.png',
+              contentType: 'image/png'
+            });
+            
+            form.append('text_prompts[0][text]', `${prompt}, seamlessly extend and outpaint the image, maintain style and composition`);
+            form.append('text_prompts[0][weight]', '1');
+            form.append('cfg_scale', '7');
+            form.append('image_strength', '0.35'); // Низкая сила для сохранения центральной части
+            form.append('samples', '1');
+            form.append('steps', '50'); // Больше шагов для лучшего результата
+            
+            const formHeaders = form.getHeaders();
             
             const stabilityResponse = await axios.post(
               'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image',
-              {
-                text_prompts: [
-                  {
-                    text: `${prompt}, seamlessly extend and outpaint the image, maintain style and composition`,
-                    weight: 1
-                  }
-                ],
-                cfg_scale: 7,
-                image_strength: 0.35, // Низкая сила для сохранения центральной части
-                init_image: imageBase64,
-                steps: 50, // Больше шагов для лучшего результата
-                samples: 1
-              },
+              form,
               {
                 headers: {
-                  'Content-Type': 'application/json',
+                  ...formHeaders,
                   'Accept': 'application/json',
                   'Authorization': `Bearer ${stabilityApiKey}`
                 },
@@ -378,27 +370,29 @@ export class StabilityService {
               .png()
               .toBuffer();
             
-            // Используем image-to-image endpoint
-            const imageBase64 = processedImage.toString('base64');
+            // Используем FormData
+            const form = new FormData();
+            
+            form.append('init_image', processedImage, {
+              filename: 'image.png',
+              contentType: 'image/png'
+            });
+            
+            form.append('text_prompts[0][text]', prompt);
+            form.append('text_prompts[0][weight]', '1');
+            form.append('cfg_scale', '7');
+            form.append('image_strength', '0.65'); // Средняя сила изменения
+            form.append('samples', '1');
+            form.append('steps', '30');
+            
+            const formHeaders = form.getHeaders();
             
             const stabilityResponse = await axios.post(
               'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image',
-              {
-                text_prompts: [
-                  {
-                    text: prompt,
-                    weight: 1
-                  }
-                ],
-                cfg_scale: 7,
-                image_strength: 0.65, // Средняя сила изменения
-                init_image: imageBase64,
-                steps: 30,
-                samples: 1
-              },
+              form,
               {
                 headers: {
-                  'Content-Type': 'application/json',
+                  ...formHeaders,
                   'Accept': 'application/json',
                   'Authorization': `Bearer ${stabilityApiKey}`
                 },
