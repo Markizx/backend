@@ -1,5 +1,7 @@
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { enhancedLogger } from '@utils/enhanced-logger';
+import { secretsCache } from '@utils/cache.service';
+import { measureExternalApi } from '@utils/performance';
 
 const client = new SecretsManagerClient({ region: process.env.AWS_REGION || 'ap-southeast-2' });
 
@@ -9,8 +11,7 @@ interface CachedSecrets {
   version?: string;
 }
 
-let cachedSecrets: CachedSecrets | null = null;
-const CACHE_TTL = 5 * 60 * 1000; // 5 минут
+const CACHE_TTL = 5 * 60; // 5 минут в секундах
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 2000;
 
@@ -31,14 +32,20 @@ async function fetchSecretsWithRetry(retries = MAX_RETRIES): Promise<Record<stri
         region: process.env.AWS_REGION 
       });
       
-      const command = new GetSecretValueCommand({ SecretId: secretName });
-      const response = await client.send(command);
+      const secrets = await measureExternalApi(
+        'aws-secrets-manager',
+        'get-secret-value',
+        async () => {
+          const command = new GetSecretValueCommand({ SecretId: secretName });
+          const response = await client.send(command);
 
-      if (!response.SecretString) {
-        throw new Error('SecretString отсутствует в ответе Secrets Manager');
-      }
+          if (!response.SecretString) {
+            throw new Error('SecretString отсутствует в ответе Secrets Manager');
+          }
 
-      const secrets = JSON.parse(response.SecretString);
+          return JSON.parse(response.SecretString);
+        }
+      );
       
       // Валидация критических ключей
       const requiredKeys = ['JWT_SECRET', 'MONGODB_URI', 'OPENAI_API_KEY'];
@@ -50,16 +57,9 @@ async function fetchSecretsWithRetry(retries = MAX_RETRIES): Promise<Record<stri
       
       enhancedLogger.info('Секреты успешно загружены', {
         keys: Object.keys(secrets),
-        version: response.VersionId,
         awsAccessKeyPresent: !!secrets.AWS_ACCESS_KEY_ID,
         awsSecretKeyPresent: !!secrets.AWS_SECRET_ACCESS_KEY,
         requiredKeysPresent: requiredKeys.filter(key => secrets[key])
-      });
-
-      // Метрика производительности
-      enhancedLogger.performance('secrets_fetch', Date.now() - performance.now(), {
-        attempt,
-        keysCount: Object.keys(secrets).length
       });
 
       return secrets;
@@ -78,37 +78,28 @@ async function fetchSecretsWithRetry(retries = MAX_RETRIES): Promise<Record<stri
 }
 
 export const getSecrets = async (forceRefresh = false): Promise<Record<string, string> | null> => {
-  const now = Date.now();
+  const cacheKey = 'main-secrets';
   
-  // Проверяем свежесть кеша
-  if (!forceRefresh && cachedSecrets && (now - cachedSecrets.timestamp) < CACHE_TTL) {
-    enhancedLogger.debug('Возвращены кешированные секреты', { 
-      age: now - cachedSecrets.timestamp,
-      keys: Object.keys(cachedSecrets.data) 
-    });
-    return cachedSecrets.data;
+  if (!forceRefresh) {
+    const cachedSecrets = secretsCache.get(cacheKey);
+    if (cachedSecrets) {
+      enhancedLogger.debug('Возвращены кешированные секреты из универсального кэша');
+      return cachedSecrets;
+    }
   }
   
   try {
-    const secrets = await fetchSecretsWithRetry();
-    
-    if (!secrets) {
-      enhancedLogger.error('Не удалось загрузить секреты после всех попыток');
-      // Возвращаем старый кеш, если есть
-      if (cachedSecrets) {
-        enhancedLogger.warn('Используются устаревшие секреты из кеша', {
-          age: now - cachedSecrets.timestamp
-        });
-        return cachedSecrets.data;
-      }
-      return null;
-    }
-    
-    // Обновляем кеш
-    cachedSecrets = {
-      data: secrets,
-      timestamp: now
-    };
+    const secrets = await secretsCache.getOrFetch(
+      cacheKey,
+      async () => {
+        const fetchedSecrets = await fetchSecretsWithRetry();
+        if (!fetchedSecrets) {
+          throw new Error('Не удалось загрузить секреты после всех попыток');
+        }
+        return fetchedSecrets;
+      },
+      CACHE_TTL
+    );
     
     // Запускаем автоматическое обновление кеша
     if (!refreshInterval) {
@@ -119,10 +110,11 @@ export const getSecrets = async (forceRefresh = false): Promise<Record<string, s
   } catch (err: any) {
     enhancedLogger.error('Критическая ошибка загрузки секретов:', err);
     
-    // В случае критической ошибки возвращаем старый кеш
-    if (cachedSecrets) {
+    // В случае критической ошибки пытаемся получить из кэша даже устаревшие
+    const staleSecrets = secretsCache.get(cacheKey);
+    if (staleSecrets) {
       enhancedLogger.warn('Возвращаются устаревшие секреты из-за ошибки загрузки');
-      return cachedSecrets.data;
+      return staleSecrets;
     }
     
     return null;
@@ -138,25 +130,24 @@ function startPeriodicRefresh() {
     } catch (err: any) {
       enhancedLogger.error('Ошибка автоматического обновления секретов:', err);
     }
-  }, CACHE_TTL);
+  }, CACHE_TTL * 1000);
   
   enhancedLogger.info('Запущено автоматическое обновление секретов', { 
-    interval: CACHE_TTL / 1000 
+    interval: CACHE_TTL
   });
 }
 
 // Функция для ручной очистки кеша
 export const clearSecretsCache = (): void => {
-  cachedSecrets = null;
+  secretsCache.del('main-secrets');
   enhancedLogger.info('Кеш секретов очищен');
 };
 
 // Функция для получения статистики кеша
 export const getSecretsStats = () => {
+  const stats = secretsCache.getStats();
   return {
-    cached: !!cachedSecrets,
-    age: cachedSecrets ? Date.now() - cachedSecrets.timestamp : null,
-    keys: cachedSecrets ? Object.keys(cachedSecrets.data) : [],
+    ...stats,
     autoRefreshActive: !!refreshInterval
   };
 };

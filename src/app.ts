@@ -16,6 +16,7 @@ import subscriptionRoutes from '@routes/subscription.routes';
 import supportRoutes from '@routes/support.routes';
 import adminRoutes from '@routes/admin.routes';
 import i18nRoutes from '@routes/i18n.routes';
+import metricsRoutes from '@routes/metrics.routes';
 import { initPlans } from './init-plans';
 import { configurePassport } from '@config/passport';
 // Импортируем непосредственно из utils/cleanup.service, избегая алиасов
@@ -24,6 +25,7 @@ import { i18nService } from '@i18n/index';
 import { i18nMiddleware } from '@middleware/i18n.middleware';
 import { maintenanceMiddleware } from '@middleware/maintenance.middleware';
 import { trackError } from '@middleware/analytics.middleware';
+import { metricsMiddleware } from '@middleware/metrics.middleware';
 import { errorMiddleware } from '@middleware/error.middleware';
 import { GlobalConfig } from '@models/GlobalConfig';
 import { createAdminIfNeeded } from './utils/createAdmin';
@@ -32,6 +34,7 @@ import { enhancedSecurityMiddleware, bodySizeLimit, validateHeaders, timingSafeR
 import { sanitizeMiddleware } from '@utils/sanitizer';
 import { withRetry, retryConditions } from '@utils/retry';
 import { circuitBreakerManager } from '@utils/circuit-breaker';
+import { cacheManager } from '@utils/cache.service';
 
 const app: Express = express();
 
@@ -133,6 +136,9 @@ async function initializeApp() {
     // Улучшенное логирование с контекстом
     app.use(loggerMiddleware);
     
+    // Добавляем middleware для сбора метрик
+    app.use(metricsMiddleware);
+    
     // CORS с улучшенной конфигурацией
     const corsOptions = {
       origin: function (origin: string | undefined, callback: Function) {
@@ -164,7 +170,7 @@ async function initializeApp() {
       stream: { 
         write: (message: string) => enhancedLogger.http(message.trim())
       },
-      skip: (req) => req.path === '/health' // Пропускаем health check
+      skip: (req) => req.path === '/health' || req.path === '/metrics' // Пропускаем health check и metrics
     }));
 
     // Подключение к MongoDB с Circuit Breaker
@@ -249,7 +255,8 @@ async function initializeApp() {
             name,
             stats.state
           ])
-        )
+        ),
+        cacheStats: cacheManager.getAllStats()
       };
       res.json(health);
     });
@@ -267,6 +274,7 @@ async function initializeApp() {
     app.use('/api/support', supportRoutes);
     app.use('/api/admin', adminRoutes);
     app.use('/api/i18n', i18nRoutes);
+    app.use('/metrics', metricsRoutes); // Добавляем роут для метрик
     enhancedLogger.info('Routes загружены');
 
     // Swagger Documentation (только в разработке)
@@ -344,6 +352,9 @@ async function initializeApp() {
         // Останавливаем cron задачи
         if (cleanupOldFiles) cleanupOldFiles.stop();
         if (cleanupOldChats) cleanupOldChats.stop();
+        
+        // Закрываем все кэши
+        cacheManager.closeAll();
         
         // Закрываем MongoDB соединение
         await mongoose.connection.close();

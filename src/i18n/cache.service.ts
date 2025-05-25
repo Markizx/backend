@@ -1,27 +1,26 @@
-import NodeCache from 'node-cache';
 import { Translation, TranslationDocument } from '@models/Translation';
 import logger from '@utils/logger';
+import { cacheManager } from '@utils/cache.service';
+import { recordCacheMetric } from '@middleware/metrics.middleware';
 
 class TranslationCacheService {
-  private cache: NodeCache;
-
-  constructor() {
-    // Кэш на 24 часа
-    this.cache = new NodeCache({ 
-      stdTTL: 24 * 60 * 60,
-      checkperiod: 60 * 60 
-    });
-  }
+  private cache = cacheManager.getCache<string>('translations', { 
+    ttl: 24 * 60 * 60, // 24 часа
+    maxKeys: 10000 
+  });
 
   async get(key: string, language: string): Promise<string | null> {
     const cacheKey = `${language}:${key}`;
     
-    // Проверяем in-memory кэш
-    const cached = this.cache.get<string>(cacheKey);
+    // Проверяем кэш
+    const cached = this.cache.get(cacheKey);
     if (cached) {
       logger.info(`Translation cached hit: ${cacheKey}`);
+      recordCacheMetric('translations', true);
       return cached;
     }
+
+    recordCacheMetric('translations', false);
 
     // Проверяем БД
     try {
@@ -43,7 +42,7 @@ class TranslationCacheService {
   async set(key: string, language: string, translation: string, originalText: string): Promise<void> {
     const cacheKey = `${language}:${key}`;
     
-    // Сохраняем в memory кэш
+    // Сохраняем в кэш
     this.cache.set(cacheKey, translation);
     
     // Сохраняем в БД
@@ -72,16 +71,17 @@ class TranslationCacheService {
     } else {
       // Invalidate all languages for this key
       const keys = this.cache.keys();
-      keys.forEach(cacheKey => {
-        if (cacheKey.endsWith(`:${key}`)) {
-          this.cache.del(cacheKey);
-        }
-      });
+      const keysToDelete = keys.filter(cacheKey => cacheKey.endsWith(`:${key}`));
+      this.cache.del(keysToDelete);
     }
   }
 
   getCacheStats() {
     return this.cache.getStats();
+  }
+
+  flush() {
+    this.cache.flush();
   }
 }
 

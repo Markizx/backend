@@ -116,7 +116,6 @@ backend
             scp -i C:\Users\PC\Desktop\contentstar.pem C:\Users\PC\contentstar\backend\src\models\User.ts ubuntu@13.237.156.187:/home/ubuntu/contentstar-backend/src/models/User.ts
             backend url = https://api.contentstar.app
             backend on EC2 
-            db mongo db atlas =mongodb+srv://contentstaruser:Ambrakadabra8826@@contentstarcluster.mongodb.net/contentstar?retryWrites=true&w=majority
             frontend url: contentstar.app 
             frontend  be soon on aws amplify 
             

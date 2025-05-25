@@ -3,6 +3,8 @@ import { getSecrets } from '@utils/getSecrets';
 import { enhancedLogger } from '@utils/enhanced-logger';
 import { withRetry, retryConditions } from '@utils/retry';
 import { circuitBreakerManager } from '@utils/circuit-breaker';
+import { videoCache } from '@utils/cache.service';
+import { measureContentGeneration, measureExternalApi } from '@utils/performance';
 import { VideoGenerationResult } from '../../types/generation.types';
 
 /**
@@ -38,89 +40,110 @@ export class RunwayService {
   static async generateVideo(prompt: string, duration: number = 10, promptImageUrl?: string): Promise<VideoGenerationResult> {
     enhancedLogger.info(`Начало генерации видео с Runway ML, prompt: ${prompt.substring(0, 50)}...`);
     
-    return circuitBreakerManager.execute(
-      'runway-video-generation',
+    // Создаем ключ кэша с учетом всех параметров
+    const cacheKey = `runway:${prompt}:${duration}:${promptImageUrl || 'no-image'}`;
+    
+    return videoCache.getOrFetch(
+      cacheKey,
       async () => {
-        return withRetry(
+        return circuitBreakerManager.execute(
+          'runway-video-generation',
           async () => {
-            const runwayApiKey = await this.getApiKey();
-            
-            const requestBody: any = {
-              model: 'gen3a_turbo',
-              ratio: '1280:768',
-              seed: Math.floor(Math.random() * 4294967295),
-              duration: duration, // 5 или 10 секунд
-            };
-            
-            // Добавляем изображение-концепт и промт, если они есть
-            if (promptImageUrl) {
-              requestBody.promptImage = promptImageUrl;
-            }
-            
-            if (prompt) {
-              requestBody.promptText = `${prompt} Create a high-quality cinematic video with professional lighting and smooth motion.`;
-            } else if (promptImageUrl) {
-              requestBody.promptText = "Create a high-quality cinematic video from this image with professional lighting and smooth motion.";
-            }
-            
-            // Отправляем запрос в Runway ML
-            const runwayRes = await axios.post(
-              'https://api.dev.runwayml.com/v1/image_to_video',
-              requestBody,
-              {
-                headers: {
-                  Authorization: `Bearer ${runwayApiKey}`,
-                  'Content-Type': 'application/json',
-                  'X-Runway-Version': '2024-11-06',
-                },
-                timeout: 240000, // 4 минуты
+            return measureContentGeneration(
+              'video',
+              'gen3a_turbo',
+              async () => {
+                return withRetry(
+                  async () => {
+                    const runwayApiKey = await this.getApiKey();
+                    
+                    const requestBody: any = {
+                      model: 'gen3a_turbo',
+                      ratio: '1280:768',
+                      seed: Math.floor(Math.random() * 4294967295),
+                      duration: duration, // 5 или 10 секунд
+                    };
+                    
+                    // Добавляем изображение-концепт и промт, если они есть
+                    if (promptImageUrl) {
+                      requestBody.promptImage = promptImageUrl;
+                    }
+                    
+                    if (prompt) {
+                      requestBody.promptText = `${prompt} Create a high-quality cinematic video with professional lighting and smooth motion.`;
+                    } else if (promptImageUrl) {
+                      requestBody.promptText = "Create a high-quality cinematic video from this image with professional lighting and smooth motion.";
+                    }
+                    
+                    // Отправляем запрос в Runway ML
+                    const runwayRes = await measureExternalApi(
+                      'runway',
+                      'create-video-task',
+                      async () => {
+                        return axios.post(
+                          'https://api.dev.runwayml.com/v1/image_to_video',
+                          requestBody,
+                          {
+                            headers: {
+                              Authorization: `Bearer ${runwayApiKey}`,
+                              'Content-Type': 'application/json',
+                              'X-Runway-Version': '2024-11-06',
+                            },
+                            timeout: 240000, // 4 минуты
+                          }
+                        );
+                      }
+                    );
+                    
+                    if (runwayRes.status !== 200) {
+                      throw new Error(`Ошибка API RunwayML: ${runwayRes.status}: ${JSON.stringify(runwayRes.data)}`);
+                    }
+                    
+                    const taskId = runwayRes.data?.id;
+                    if (!taskId) {
+                      throw new Error('Runway не вернул taskId');
+                    }
+                    
+                    // Ждем завершения генерации видео
+                    const videoUrl = await this.pollTaskStatus(taskId, runwayApiKey);
+                    if (!videoUrl) {
+                      throw new Error('Runway не завершил задачу вовремя');
+                    }
+                    
+                    return { 
+                      videoUrl, 
+                      s3Url: '', // s3Url будет добавлен в video.service
+                      duration,
+                      resolution: '1280x768',
+                      quality: 'high-definition'
+                    };
+                  },
+                  {
+                    maxRetries: 3,
+                    baseDelay: 5000,
+                    retryCondition: retryConditions.runway,
+                    onRetry: (error, attempt) => {
+                      enhancedLogger.warn(`Повтор генерации видео Runway, попытка ${attempt}`, { 
+                        error: error.message,
+                        status: error.response?.status 
+                      });
+                    }
+                  }
+                );
               }
             );
-            
-            if (runwayRes.status !== 200) {
-              throw new Error(`Ошибка API RunwayML: ${runwayRes.status}: ${JSON.stringify(runwayRes.data)}`);
-            }
-            
-            const taskId = runwayRes.data?.id;
-            if (!taskId) {
-              throw new Error('Runway не вернул taskId');
-            }
-            
-            // Ждем завершения генерации видео
-            const videoUrl = await this.pollTaskStatus(taskId, runwayApiKey);
-            if (!videoUrl) {
-              throw new Error('Runway не завершил задачу вовремя');
-            }
-            
-            return { 
-              videoUrl, 
-              s3Url: '', // s3Url будет добавлен в video.service
-              duration,
-              resolution: '1280x768',
-              quality: 'high-definition'
-            };
           },
           {
-            maxRetries: 3,
-            baseDelay: 5000,
-            retryCondition: retryConditions.runway,
-            onRetry: (error, attempt) => {
-              enhancedLogger.warn(`Повтор генерации видео Runway, попытка ${attempt}`, { 
-                error: error.message,
-                status: error.response?.status 
-              });
+            failureThreshold: 2,
+            resetTimeout: 120000, // 2 минуты
+            fallback: async () => {
+              enhancedLogger.error('Circuit breaker открыт для Runway video generation');
+              throw new Error('Сервис генерации видео временно недоступен');
             }
           }
         );
       },
-      {
-        failureThreshold: 2,
-        resetTimeout: 120000, // 2 минуты
-        fallback: async () => {
-          enhancedLogger.error('Circuit breaker открыт для Runway video generation');
-          throw new Error('Сервис генерации видео временно недоступен');
-        }
-      }
+      60 * 60 // Кэшируем видео на 1 час
     );
   }
   
@@ -140,13 +163,19 @@ export class RunwayService {
     
     while (Date.now() - startTime < maxWaitTime) {
       try {
-        const taskRes = await axios.get(`https://api.dev.runwayml.com/v1/tasks/${taskId}`, {
-          headers: {
-            Authorization: `Bearer ${runwayApiKey}`,
-            'X-Runway-Version': '2024-11-06',
-          },
-          timeout: 10000,
-        });
+        const taskRes = await measureExternalApi(
+          'runway',
+          'check-task-status',
+          async () => {
+            return axios.get(`https://api.dev.runwayml.com/v1/tasks/${taskId}`, {
+              headers: {
+                Authorization: `Bearer ${runwayApiKey}`,
+                'X-Runway-Version': '2024-11-06',
+              },
+              timeout: 10000,
+            });
+          }
+        );
         
         if (taskRes.status === 200) {
           const status = taskRes.data.status;
