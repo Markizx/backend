@@ -1,4 +1,6 @@
-import logger from '@utils/logger';
+import { enhancedLogger } from '@utils/enhanced-logger';
+import { withRetry, retryConditions } from '@utils/retry';
+import { circuitBreakerManager } from '@utils/circuit-breaker';
 import { GrokService } from './ai/grok.service';
 import { OpenAIService } from './ai/openai.service';
 
@@ -13,10 +15,47 @@ export class ChatService {
    * @returns ответ от Grok AI
    */
   static async getGrokResponse(messages: Array<{role: string, content: string}>) {
-    logger.info(`Отправка запроса в Grok AI`);
+    enhancedLogger.info(`Отправка запроса в Grok AI`);
     
-    // Используем GrokService для получения ответа
-    return await GrokService.getChatResponse(messages);
+    // Используем Circuit Breaker для защиты от каскадных сбоев
+    return circuitBreakerManager.execute(
+      'grok-chat',
+      async () => {
+        return withRetry(
+          async () => {
+            return await GrokService.getChatResponse(messages);
+          },
+          {
+            maxRetries: 3,
+            baseDelay: 1000,
+            retryCondition: (error) => {
+              // Повторяем при сетевых ошибках и временных сбоях
+              if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
+                return true;
+              }
+              if (error.response?.status >= 500) {
+                return true;
+              }
+              return false;
+            },
+            onRetry: (error, attempt) => {
+              enhancedLogger.warn(`Повтор запроса к Grok AI, попытка ${attempt}`, { 
+                error: error.message,
+                status: error.response?.status 
+              });
+            }
+          }
+        );
+      },
+      {
+        failureThreshold: 5,
+        resetTimeout: 60000, // 1 минута
+        fallback: async () => {
+          enhancedLogger.error('Circuit breaker открыт для Grok AI, используем fallback');
+          return "Извините, сервис временно недоступен. Пожалуйста, попробуйте позже.";
+        }
+      }
+    );
   }
   
   /**
@@ -29,7 +68,7 @@ export class ChatService {
     try {
       return await OpenAIService.translateToEnglish(text);
     } catch (error: any) {
-      logger.error(`Ошибка перевода текста в chat.service: ${error.message}`);
+      enhancedLogger.error(`Ошибка перевода текста в chat.service`, error);
       // В случае ошибки возвращаем оригинальный текст
       return text;
     }

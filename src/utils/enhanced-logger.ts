@@ -117,7 +117,7 @@ class EnhancedLogger {
           winston.format.json(),
           winston.format.printf(info => {
             // Логируем только критические ошибки
-            if (info.metadata?.critical) {
+            if ((info as any).metadata?.critical) {
               return JSON.stringify(info);
             }
             return '';
@@ -343,12 +343,21 @@ class EnhancedLogger {
     if (!error) return null;
 
     if (error instanceof Error) {
-      return {
+      // Сначала извлекаем базовые свойства
+      const serialized: any = {
         name: error.name,
         message: error.message,
         stack: error.stack,
-        ...error,
       };
+      
+      // Затем добавляем дополнительные свойства, если они есть
+      Object.keys(error).forEach(key => {
+        if (key !== 'name' && key !== 'message' && key !== 'stack') {
+          serialized[key] = (error as any)[key];
+        }
+      });
+      
+      return serialized;
     }
 
     return error;

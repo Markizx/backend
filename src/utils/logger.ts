@@ -1,7 +1,8 @@
 import winston from 'winston';
 import DailyRotateFile from 'winston-daily-rotate-file';
 
-const logger = winston.createLogger({
+// Создаем оригинальный winston logger
+const winstonLogger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
     winston.format.timestamp(),
@@ -23,11 +24,30 @@ const logger = winston.createLogger({
 });
 
 if (process.env.NODE_ENV !== 'production') {
-  logger.add(
+  winstonLogger.add(
     new winston.transports.Console({
       format: winston.format.simple(),
     })
   );
 }
+
+// Создаем обертку, которая будет использовать enhanced logger когда он доступен
+const logger = {
+  error: (message: string, meta?: any) => {
+    if (typeof meta === 'object' && meta !== null && !(meta instanceof Error)) {
+      winstonLogger.error(message, meta);
+    } else if (meta instanceof Error) {
+      winstonLogger.error(message, { error: meta.message, stack: meta.stack });
+    } else {
+      winstonLogger.error(message);
+    }
+  },
+  warn: (message: string, meta?: any) => winstonLogger.warn(message, meta),
+  info: (message: string, meta?: any) => winstonLogger.info(message, meta),
+  http: (message: string, meta?: any) => winstonLogger.http(message, meta),
+  verbose: (message: string, meta?: any) => winstonLogger.verbose(message, meta),
+  debug: (message: string, meta?: any) => winstonLogger.debug(message, meta),
+  silly: (message: string, meta?: any) => winstonLogger.debug(message, meta),
+};
 
 export default logger;

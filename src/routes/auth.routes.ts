@@ -8,7 +8,7 @@ import { trackEvent } from '@middleware/analytics.middleware';
 import { blacklistOnLogout } from '@utils/token-blacklist';
 import { ApiResponse } from '@utils/response';
 import passport from 'passport';
-import logger from '@utils/logger';
+import { enhancedLogger } from '@utils/enhanced-logger';
 import { UserDocument } from '@models/User';
 
 const router = Router();
@@ -65,24 +65,24 @@ router.post(
 );
 
 router.get('/google', (req: Request, res: Response, next: NextFunction) => {
-  logger.info('Handling /auth/google');
+  enhancedLogger.info('Handling /auth/google');
   try {
     AuthController.googleAuth(req, res, next);
   } catch (err: any) {
-    logger.error('Ошибка в /auth/google:', { error: err.message, stack: err.stack });
+    enhancedLogger.error('Ошибка в /auth/google:', err);
     ApiResponse.sendError(res, 'Ошибка Google OAuth', null, 500);
   }
 });
 
 router.get('/google/callback', (req: Request, res: Response, next: NextFunction) => {
-  logger.info('Handling /auth/google/callback');
+  enhancedLogger.info('Handling /auth/google/callback');
   passport.authenticate('google', { session: false }, (err: any, user: UserDocument | false, info: any) => {
     if (err) {
-      logger.error('Ошибка в /auth/google/callback:', { error: err.message, stack: err.stack });
+      enhancedLogger.error('Ошибка в /auth/google/callback:', err);
       return ApiResponse.sendError(res, 'Ошибка Google OAuth', null, 500);
     }
     if (!user) {
-      logger.warn('Google OAuth: пользователь не аутентифицирован', { info });
+      enhancedLogger.warn('Google OAuth: пользователь не аутентифицирован', { info });
       return ApiResponse.sendError(res, 'Аутентификация через Google не удалась', null, 401);
     }
     req.user = user;

@@ -9,7 +9,7 @@ import { AuthenticatedRequest, generateToken } from '@middleware/auth.middleware
 import { I18nRequest } from '@middleware/i18n.middleware';
 import { trackEventManual } from '@middleware/analytics.middleware';
 import { blacklistService } from '@utils/token-blacklist';
-import { withRetry } from '@utils/retry';
+import { withRetry, retryConditions } from '@utils/retry';
 import { enhancedLogger } from '@utils/enhanced-logger';
 import { Sanitizer } from '@utils/sanitizer';
 import { getConfig } from '@config/config';
@@ -99,7 +99,7 @@ export const AuthController = {
         {
           maxRetries: 3,
           baseDelay: 1000,
-          retryCondition: (error) => error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT'
+          retryCondition: retryConditions.openai
         }
       );
       
@@ -267,7 +267,7 @@ export const AuthController = {
         user: { id: user._id.toString(), email: user.email, roles: user.roles }
       });
     } catch (err: any) {
-      requestLogger.error('Ошибка входа:', err);
+      requestLogger.error('Ошибка входа:', { error: err.message, stack: err.stack });
       return ApiResponse.sendError(res, await i18nReq.t('errors.internal_error'), err.message, 500);
     }
   },

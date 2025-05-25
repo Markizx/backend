@@ -2,24 +2,39 @@ import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import { User, UserDocument } from '@models/User';
 import { getConfig } from '@config/config';
-import logger from '@utils/logger';
+import { enhancedLogger } from '@utils/enhanced-logger';
+import { withRetry } from '@utils/retry';
 
 async function createAdminIfNeeded() {
   try {
-    logger.info('Проверка и создание административной учетной записи');
+    enhancedLogger.info('Проверка и создание административной учетной записи');
     
     const config = await getConfig();
     const adminEmail = config.ADMIN_EMAIL;
     
     if (!adminEmail) {
-      logger.warn('ADMIN_EMAIL не указан в конфигурации, пропуск создания admin');
+      enhancedLogger.warn('ADMIN_EMAIL не указан в конфигурации, пропуск создания admin');
       return;
     }
     
-    let adminUser = await User.findOne({ email: adminEmail }) as UserDocument | null;
+    // Ищем пользователя с retry (на случай если БД еще не готова)
+    let adminUser = await withRetry(
+      async () => {
+        return await User.findOne({ email: adminEmail }) as UserDocument | null;
+      },
+      {
+        maxRetries: 3,
+        baseDelay: 1000,
+        retryCondition: (error) => {
+          // Повторяем при ошибках подключения к БД
+          return error.name === 'MongoNetworkError' || 
+                 error.name === 'MongooseServerSelectionError';
+        }
+      }
+    );
     
     if (!adminUser) {
-      logger.info(`Создание административной учетной записи с email: ${adminEmail}`);
+      enhancedLogger.info(`Создание административной учетной записи с email: ${adminEmail}`);
       
       // Генерация случайного пароля, если не задан
       const adminPassword = config.ADMIN_PASSWORD || Math.random().toString(36).slice(-12);
@@ -41,24 +56,25 @@ async function createAdminIfNeeded() {
         preferredLanguage: 'ru'
       });
       
-      logger.info(`Admin пользователь создан с email: ${adminEmail}`);
+      enhancedLogger.info(`Admin пользователь создан с email: ${adminEmail}`, {
+        roles: adminUser.roles,
+        isActive: adminUser.isActive,
+        emailVerified: adminUser.emailVerified
+      });
       
       if (!config.ADMIN_PASSWORD) {
-        logger.info(`Сгенерирован временный пароль для admin: ${adminPassword}`);
-        logger.info('Рекомендуется сменить пароль после первого входа');
+        enhancedLogger.warn(`Сгенерирован временный пароль для admin: ${adminPassword}`);
+        enhancedLogger.warn('ВАЖНО: Рекомендуется сменить пароль после первого входа');
       }
     } else if (!adminUser.roles.includes('admin')) {
       adminUser.roles.push('admin');
       await adminUser.save();
-      logger.info(`Роль admin добавлена для пользователя ${adminEmail}`);
+      enhancedLogger.info(`Роль admin добавлена для пользователя ${adminEmail}`);
     } else {
-      logger.info(`Admin пользователь с email ${adminEmail} уже существует`);
+      enhancedLogger.info(`Admin пользователь с email ${adminEmail} уже существует`);
     }
   } catch (err: any) {
-    logger.error('Ошибка создания admin пользователя:', { 
-      error: err.message, 
-      stack: err.stack 
-    });
+    enhancedLogger.error('Ошибка создания admin пользователя:', err);
   }
 }
 

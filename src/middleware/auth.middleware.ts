@@ -3,7 +3,7 @@ import jwt from 'jsonwebtoken';
 import { getConfig } from '@config/config';
 import { GlobalConfig, GlobalConfigDocument } from '@models/GlobalConfig';
 import { blacklistService } from '@utils/token-blacklist';
-import logger from '@utils/logger';
+import { enhancedLogger } from '@utils/enhanced-logger';
 import { User, UserDocument } from '@models/User';
 import { ApiResponse } from '@utils/response';
 
@@ -22,20 +22,18 @@ export interface JWTPayload {
 }
 
 let JWT_SECRET: string;
-let JWT_ISSUER: string = 'contentstar.app';
 
 async function initializeJwt() {
   try {
     const config = await getConfig();
     JWT_SECRET = config.JWT_SECRET;
-    JWT_ISSUER = config.JWT_ISSUER || 'contentstar.app';
     
     if (!JWT_SECRET) {
       throw new Error('JWT_SECRET не найден в конфигурации');
     }
-    logger.info('JWT_SECRET инициализирован');
+    enhancedLogger.info('JWT_SECRET инициализирован');
   } catch (err: any) {
-    logger.error('Ошибка инициализации JWT_SECRET:', { error: err.message, stack: err.stack });
+    enhancedLogger.error('Ошибка инициализации JWT_SECRET:', err);
     process.exit(1);
   }
 }
@@ -53,7 +51,7 @@ export const authenticate = async (
     
     // Если аутентификация отключена глобально, пропускаем всех пользователей
     if (globalConfig && globalConfig.authenticationEnabled === false) {
-      logger.info('Аутентификация отключена глобально - доступ разрешен без проверки токена');
+      enhancedLogger.info('Аутентификация отключена глобально - доступ разрешен без проверки токена');
       
       // Устанавливаем флаг отключенной аутентификации
       (req as AuthenticatedRequest).authDisabled = true;
@@ -71,7 +69,7 @@ export const authenticate = async (
     const authHeader = req.headers.authorization;
     
     if (!authHeader?.startsWith('Bearer ')) {
-      logger.warn('Токен не предоставлен');
+      enhancedLogger.warn('Токен не предоставлен');
       return ApiResponse.sendError(res, 'Токен не предоставлен', null, 401);
     }
 
@@ -80,7 +78,7 @@ export const authenticate = async (
     // Проверяем токен в черном списке
     const isBlacklisted = await blacklistService.isBlacklisted(tokenString);
     if (isBlacklisted) {
-      logger.warn('Попытка использования токена из черного списка');
+      enhancedLogger.warn('Попытка использования токена из черного списка');
       return ApiResponse.sendError(res, 'Токен недействителен', null, 401);
     }
     
@@ -88,7 +86,6 @@ export const authenticate = async (
       if (!JWT_SECRET) {
         const config = await getConfig();
         JWT_SECRET = config.JWT_SECRET;
-        JWT_ISSUER = config.JWT_ISSUER || 'contentstar.app';
         
         if (!JWT_SECRET) {
           throw new Error('JWT_SECRET не найден в конфигурации');
@@ -98,32 +95,31 @@ export const authenticate = async (
       // Улучшенная проверка JWT с дополнительными параметрами безопасности
       const decoded = jwt.verify(tokenString, JWT_SECRET, {
         algorithms: ['HS256'],
-        issuer: JWT_ISSUER,
         maxAge: '7d', // Максимальный возраст токена
         clockTolerance: 30, // Допустимое расхождение времени в секундах
       }) as JWTPayload;
 
       // Дополнительные проверки payload
       if (!decoded.id || !decoded.email || !Array.isArray(decoded.roles)) {
-        logger.warn('Неполный payload в JWT токене');
+        enhancedLogger.warn('Неполный payload в JWT токене');
         return ApiResponse.sendError(res, 'Недействительный токен', null, 401);
       }
 
       // Проверяем существование пользователя и его активность
       const user = await User.findById(decoded.id) as UserDocument | null;
       if (!user) {
-        logger.warn('Пользователь не найден', { userId: decoded.id });
+        enhancedLogger.warn('Пользователь не найден', { userId: decoded.id });
         return ApiResponse.sendError(res, 'Пользователь не найден', null, 404);
       }
       
       if (!user.isActive) {
-        logger.warn('Аккаунт заблокирован', { userId: decoded.id });
+        enhancedLogger.warn('Аккаунт заблокирован', { userId: decoded.id });
         return ApiResponse.sendError(res, 'Аккаунт заблокирован', null, 403);
       }
 
       // Проверяем, что email в токене соответствует email пользователя
       if (user.email !== decoded.email) {
-        logger.warn('Email в токене не соответствует email пользователя', {
+        enhancedLogger.warn('Email в токене не соответствует email пользователя', {
           tokenEmail: decoded.email,
           userEmail: user.email
         });
@@ -142,20 +138,20 @@ export const authenticate = async (
       next();
     } catch (jwtError: any) {
       if (jwtError.name === 'TokenExpiredError') {
-        logger.info('JWT токен истек', { error: jwtError.message });
+        enhancedLogger.info('JWT токен истек', { error: jwtError.message });
         return ApiResponse.sendError(res, 'Токен истек', null, 401);
       }
       
       if (jwtError.name === 'JsonWebTokenError') {
-        logger.warn('Недействительный JWT токен', { error: jwtError.message });
+        enhancedLogger.warn('Недействительный JWT токен', { error: jwtError.message });
         return ApiResponse.sendError(res, 'Недействительный токен', null, 401);
       }
       
-      logger.error('Ошибка проверки JWT:', { error: jwtError.message });
+      enhancedLogger.error('Ошибка проверки JWT:', jwtError);
       return ApiResponse.sendError(res, 'Не авторизован', jwtError.message, 401);
     }
   } catch (err: any) {
-    logger.error('Ошибка авторизации:', { error: err.message, stack: err.stack });
+    enhancedLogger.error('Ошибка авторизации:', err);
     return ApiResponse.sendError(res, 'Не авторизован', err.message, 401);
   }
 };
@@ -202,17 +198,15 @@ export const optionalAuthenticate = async (
       if (!JWT_SECRET) {
         const config = await getConfig();
         JWT_SECRET = config.JWT_SECRET;
-        JWT_ISSUER = config.JWT_ISSUER || 'contentstar.app';
         
         if (!JWT_SECRET) {
-          logger.warn('JWT_SECRET не найден в конфигурации при опциональной аутентификации');
+          enhancedLogger.warn('JWT_SECRET не найден в конфигурации при опциональной аутентификации');
           return next();
         }
       }
       
       const decoded = jwt.verify(tokenString, JWT_SECRET, {
         algorithms: ['HS256'],
-        issuer: JWT_ISSUER,
         maxAge: '7d',
         clockTolerance: 30,
       }) as JWTPayload;
@@ -233,12 +227,12 @@ export const optionalAuthenticate = async (
       }
     } catch (jwtError) {
       // Игнорируем ошибки JWT для опциональной аутентификации
-      logger.debug('Недействительный токен при опциональной аутентификации');
+      enhancedLogger.debug('Недействительный токен при опциональной аутентификации');
     }
 
     next();
   } catch (err: any) {
-    logger.error('Ошибка опциональной авторизации:', { error: err.message, stack: err.stack });
+    enhancedLogger.error('Ошибка опциональной авторизации:', err);
     next(); // Продолжаем даже при ошибке
   }
 };
@@ -250,19 +244,20 @@ export async function generateToken(user: UserDocument): Promise<string> {
   if (!JWT_SECRET) {
     const config = await getConfig();
     JWT_SECRET = config.JWT_SECRET;
-    JWT_ISSUER = config.JWT_ISSUER || 'contentstar.app';
+  }
+
+  if (!user._id) {
+    throw new Error('User ID is missing');
   }
 
   const payload: JWTPayload = {
     id: user._id.toString(),
     email: user.email,
     roles: user.roles,
-    iss: JWT_ISSUER,
   };
 
   return jwt.sign(payload, JWT_SECRET, {
     algorithm: 'HS256',
     expiresIn: '7d',
-    issuer: JWT_ISSUER,
   });
 }
