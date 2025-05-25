@@ -137,13 +137,13 @@ export const metricsMiddleware = (req: Request, res: Response, next: NextFunctio
   let responseSize = 0;
   
   // Перехватываем write для подсчета размера ответа
-  res.write = function(chunk: any, ...args: any[]): any {
+  (res as any).write = function(chunk: any, ...args: any[]): any {
     responseSize += Buffer.byteLength(chunk);
-    return originalWrite.apply(res, [chunk, ...args]);
+    return (originalWrite as any).apply(res, arguments);
   };
   
   // Перехватываем end для записи метрик
-  res.end = function(chunk?: any, ...args: any[]): any {
+  (res as any).end = function(chunk?: any, ...args: any[]): any {
     if (chunk) {
       responseSize += Buffer.byteLength(chunk);
     }
@@ -177,7 +177,7 @@ export const metricsMiddleware = (req: Request, res: Response, next: NextFunctio
       });
     }
     
-    return originalEnd.apply(res, [chunk, ...args]);
+    return (originalEnd as any).apply(res, arguments);
   };
   
   next();
