@@ -1,0 +1,121 @@
+backend
+│   .env
+│   .gitignore
+│   check-project.sh
+│   package.json
+│   README.md
+│   Structure.txt
+│   test-image.jpg
+│   tsconfig.json
+│   update-config.sh
+│
+└───src
+    │   app.ts
+    │   init-plans.ts
+    │
+    ├───config
+    │       config.ts
+    │       passport.ts
+    │
+    ├───constants
+    │       enums.ts
+    │
+    ├───controllers
+    │       auth.controller.ts
+    │       chat.controller.ts
+    │       generate.controller.ts
+    │       subscription.controller.ts
+    │       support.controller.ts
+    │
+    ├───docs
+    │       admin.swagger.ts
+    │       auth.swagger.ts
+    │       chat.swagger.ts
+    │       generate.swagger.ts
+    │       i18n.swagger.ts
+    │       subscription.swagger.ts
+    │       support.swagger.ts
+    │       user.swagger.ts
+    │
+    ├───i18n
+    │   │   cache.service.ts
+    │   │   index.ts
+    │   │   translator.service.ts
+    │   │
+    │   └───locales
+    │       └───en
+    │               common.json
+    │
+    ├───middleware
+    │       analytics.middleware.ts
+    │       auth.middleware.ts
+    │       error.middleware.ts
+    │       i18n.middleware.ts
+    │       maintenance.middleware.ts
+    │       metrics.middleware.ts
+    │       objectId.middleware.ts
+    │       rate.limiter.ts
+    │       role.middleware.ts
+    │       security.middleware.ts
+    │
+    ├───models
+    │       Analytics.ts
+    │       Chat.ts
+    │       GeneratedFile.ts
+    │       GlobalConfig.ts
+    │       Message.ts
+    │       SubscriptionPlan.ts
+    │       SupportTicket.ts
+    │       Translation.ts
+    │       User.ts
+    │
+    ├───routes
+    │       admin.routes.ts
+    │       auth.routes.ts
+    │       chat.routes.ts
+    │       generate.routes.ts
+    │       i18n.routes.ts
+    │       metrics.routes.ts
+    │       subscription.routes.ts
+    │       support.routes.ts
+    │       user.routes.ts
+    │
+    ├───scripts
+    │       test-stability-inpainting.ts
+    │
+    ├───services
+    │   │   aws.service.ts
+    │   │   chat.service.ts
+    │   │   image.service.ts
+    │   │   mailService.ts
+    │   │   text.service.ts
+    │   │   translation.service.ts
+    │   │   video.service.ts
+    │   │
+    │   └───ai
+    │           grok.service.ts
+    │           index.ts
+    │           openai.service.ts
+    │           runway.service.ts
+    │           stability.service.ts
+    │
+    ├───types
+    │       generation.types.ts
+    │       i18n.d.ts
+    │       passport-apple.d.ts
+    │
+    └───utils
+            asyncHandler.ts
+            cache.service.ts
+            circuit-breaker.ts
+            cleanup.service.ts
+            createAdmin.ts
+            enhanced-logger.ts
+            getSecrets.ts
+            logger.ts
+            performance.ts
+            response.ts
+            retry.ts
+            sanitizer.ts
+            swagger.ts
+            token-blacklist.ts
